@@ -27,6 +27,8 @@ type client struct {
 	ctx  context.Context
 }
 
+var eventWriteTimeout = 2 * time.Second
+
 func NewServer(cfg *config.Config, incusClient *incus.Client) *Server {
 	return &Server{
 		cfg:     cfg,
@@ -40,7 +42,8 @@ func NewServer(cfg *config.Config, incusClient *incus.Client) *Server {
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	go s.broadcastEvents(ctx)
+	go s.listenEvents(ctx)
+	go s.forwardEvents(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
@@ -143,7 +146,7 @@ func (s *Server) sendError(c *client, id string, message string) {
 	c.conn.Write(context.Background(), websocket.MessageText, data)
 }
 
-func (s *Server) broadcastEvents(ctx context.Context) {
+func (s *Server) listenEvents(ctx context.Context) {
 	err := s.incus.ListenEvents(ctx, s.eventCh)
 	if err != nil {
 		log.Printf("incus event stream ended: %v (will retry in 5s)", err)
@@ -151,24 +154,43 @@ func (s *Server) broadcastEvents(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(5 * time.Second):
-			go s.broadcastEvents(ctx)
+			go s.listenEvents(ctx)
 		}
 		return
 	}
 }
 
+func (s *Server) forwardEvents(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-s.eventCh:
+			s.broadcastEvent(event)
+		}
+	}
+}
+
 func (s *Server) broadcastEvent(event incus.Event) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	clients := make([]*client, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.mu.RUnlock()
 
 	msg, err := json.Marshal(event)
 	if err != nil {
 		return
 	}
 
-	for c := range s.clients {
-		writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		c.conn.Write(writeCtx, websocket.MessageText, msg)
-		cancel()
+	for _, c := range clients {
+		go func(c *client) {
+			writeCtx, cancel := context.WithTimeout(context.Background(), eventWriteTimeout)
+			defer cancel()
+			if err := c.conn.Write(writeCtx, websocket.MessageText, msg); err != nil {
+				log.Printf("write event to client: %v", err)
+			}
+		}(c)
 	}
 }
