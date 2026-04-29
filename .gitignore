@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+web/node_modules/
+
+# Build output
+web/dist/
+anvil-server
+
+# IDE
+.idea/
+.vscode/
+.claude/
+.agents/
+.worktrees/
+worktrees/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Go
+*.test
+*.out
+coverage.out
+
+# Certificates and keys
+*.pem
+*.crt
+*.key
+*.p12
+*.pfx
+
+# Logs
+*.log
+
+# Local development harness and notes
+docs/
+CLAUDE.md
+README.md
