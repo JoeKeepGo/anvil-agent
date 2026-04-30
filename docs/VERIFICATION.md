@@ -20,6 +20,47 @@ rsync -az -e 'ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o Use
 ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'cd /opt/anvil-agent-m1-phase-4; go test ./...'
 ```
 
+## Runtime Build And Service
+
+Build the Anvil Agent binary on the development server:
+
+```bash
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'cd /opt/anvil-agent; go build -o /usr/local/bin/anvil-agent ./cmd/anvil-agent'
+```
+
+Install or update the development systemd service:
+
+```bash
+scp -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null deploy/systemd/anvil-agent.service root@47.74.37.12:/etc/systemd/system/anvil-agent.service
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'systemctl daemon-reload && systemctl enable anvil-agent.service && systemctl restart anvil-agent.service'
+```
+
+Inspect service status and logs:
+
+```bash
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'systemctl status anvil-agent.service --no-pager -l'
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'journalctl -u anvil-agent.service -n 100 --no-pager'
+```
+
+Expected log facts:
+
+- `Anvil agent listening on 127.0.0.1:9090`
+- `Incus socket: /var/lib/incus/unix.socket`
+
+Verify the service is active and locally bound:
+
+```bash
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'systemctl is-active anvil-agent.service'
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 "ss -ltnp | grep '127.0.0.1:9090'"
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'curl http://127.0.0.1:9090/health'
+```
+
+Expected health response:
+
+```json
+{"status":"ok"}
+```
+
 ## Tunnel Health Smoke
 
 ```bash
@@ -47,6 +88,7 @@ Expected behavior:
 - response `id` equals request `id`
 - response `status` is `200`
 - response `body` is the raw Incus response JSON
+- clients must match responses by request `id`, because event messages can arrive on the same WebSocket
 
 ## Dashboard Guard Checks
 
