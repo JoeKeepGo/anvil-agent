@@ -1,14 +1,15 @@
 [Unit]
-Description=Anvil host agent
+Description=Anvil Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=PROXY_HOST=127.0.0.1
-Environment=PROXY_PORT=9090
+WorkingDirectory=/opt/anvil-agent
+Environment=ANVIL_AGENT_HOST=127.0.0.1
+Environment=ANVIL_AGENT_PORT=9090
 Environment=INCUS_SOCKET=/var/lib/incus/unix.socket
-ExecStart=/usr/local/bin/anvil-host-agent
+ExecStart=/usr/local/bin/anvil-agent
 Restart=on-failure
 RestartSec=5s
 

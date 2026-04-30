@@ -1,4 +1,4 @@
-module github.com/anvil/proxy
+module github.com/JoeKeepGo/anvil-agent
 
 go 1.26.0
 

@@ -20,20 +20,20 @@ func Load() (*Config, error) {
 		IncusSocket: "/var/lib/incus/unix.socket",
 	}
 
-	if v := os.Getenv("PROXY_PORT"); v != "" {
+	if v := os.Getenv("ANVIL_AGENT_PORT"); v != "" {
 		port, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid PROXY_PORT %q: %w", v, err)
+			return nil, fmt.Errorf("invalid ANVIL_AGENT_PORT %q: %w", v, err)
 		}
 		cfg.Port = port
 	}
-	if v := os.Getenv("PROXY_HOST"); v != "" {
+	if v := os.Getenv("ANVIL_AGENT_HOST"); v != "" {
 		cfg.Host = v
 	}
 	if v := os.Getenv("INCUS_SOCKET"); v != "" {
 		cfg.IncusSocket = v
 	}
-	if v := os.Getenv("PROXY_AUTH_TOKEN"); v != "" {
+	if v := os.Getenv("ANVIL_AGENT_AUTH_TOKEN"); v != "" {
 		cfg.AuthToken = v
 	}
 

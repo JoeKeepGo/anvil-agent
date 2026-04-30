@@ -6,9 +6,9 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/anvil/proxy/internal/config"
-	"github.com/anvil/proxy/internal/incus"
-	"github.com/anvil/proxy/internal/proxy"
+	"github.com/JoeKeepGo/anvil-agent/internal/config"
+	"github.com/JoeKeepGo/anvil-agent/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/proxy"
 )
 
 func main() {

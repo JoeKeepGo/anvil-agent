@@ -3,11 +3,6 @@ package config
 import "testing"
 
 func TestLoadUsesDefaults(t *testing.T) {
-	t.Setenv("PROXY_PORT", "")
-	t.Setenv("PROXY_HOST", "")
-	t.Setenv("INCUS_SOCKET", "")
-	t.Setenv("PROXY_AUTH_TOKEN", "")
-
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -27,19 +22,19 @@ func TestLoadUsesDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadUsesEnvironmentOverrides(t *testing.T) {
-	t.Setenv("PROXY_PORT", "19090")
-	t.Setenv("PROXY_HOST", "127.0.0.2")
+func TestLoadUsesAnvilAgentEnvironment(t *testing.T) {
+	t.Setenv("ANVIL_AGENT_HOST", "0.0.0.0")
+	t.Setenv("ANVIL_AGENT_PORT", "19090")
+	t.Setenv("ANVIL_AGENT_AUTH_TOKEN", "secret")
 	t.Setenv("INCUS_SOCKET", "/tmp/incus.sock")
-	t.Setenv("PROXY_AUTH_TOKEN", "secret")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.ListenAddr() != "127.0.0.2:19090" {
-		t.Fatalf("listen addr = %q, want 127.0.0.2:19090", cfg.ListenAddr())
+	if cfg.ListenAddr() != "0.0.0.0:19090" {
+		t.Fatalf("listen addr = %q, want 0.0.0.0:19090", cfg.ListenAddr())
 	}
 	if cfg.IncusSocket != "/tmp/incus.sock" {
 		t.Fatalf("incus socket = %q, want /tmp/incus.sock", cfg.IncusSocket)
@@ -49,11 +44,32 @@ func TestLoadUsesEnvironmentOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidPort(t *testing.T) {
-	t.Setenv("PROXY_PORT", "not-a-port")
+func TestLoadRejectsInvalidAnvilAgentPort(t *testing.T) {
+	t.Setenv("ANVIL_AGENT_PORT", "not-a-port")
 
 	cfg, err := Load()
 	if err == nil {
 		t.Fatalf("Load returned nil error and config %+v, want invalid port error", cfg)
+	}
+}
+
+func TestLoadIgnoresLegacyProxyEnvironment(t *testing.T) {
+	t.Setenv("PROXY_HOST", "0.0.0.0")
+	t.Setenv("PROXY_PORT", "19090")
+	t.Setenv("PROXY_AUTH_TOKEN", "legacy")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Host != "127.0.0.1" {
+		t.Fatalf("host = %q, want default host", cfg.Host)
+	}
+	if cfg.Port != 9090 {
+		t.Fatalf("port = %d, want default port", cfg.Port)
+	}
+	if cfg.AuthToken != "" {
+		t.Fatalf("auth token = %q, want empty token", cfg.AuthToken)
 	}
 }
