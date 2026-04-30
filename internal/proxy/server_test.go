@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anvil/proxy/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/incus"
 	"github.com/coder/websocket"
 )
 
