@@ -1,23 +1,23 @@
 # M1 Verification
 
-## Local Host-Agent Tests
+## Local Anvil Agent Tests
 
 ```bash
 GOCACHE=/tmp/anvil-go-cache GOMODCACHE=/tmp/anvil-go-modcache go test ./...
 ```
 
-## Remote Host-Agent Tests
+## Remote Anvil Agent Tests
 
 ```bash
-rsync -az -e 'ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' --delete --exclude '.git' --exclude 'tmp' --exclude 'docs/superpowers' /Users/joeyang/Documents/Projects/anvil/ root@47.74.37.12:/opt/anvil/
-ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'cd /opt/anvil; go test ./...'
+rsync -az -e 'ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' --delete --exclude '.git' --exclude 'tmp' --exclude 'docs/superpowers' /Users/joeyang/Documents/Projects/anvil-agent/ root@47.74.37.12:/opt/anvil-agent/
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'cd /opt/anvil-agent; go test ./...'
 ```
 
 When verifying an unmerged feature worktree, replace the source and destination paths with the worktree under test, for example:
 
 ```bash
-rsync -az -e 'ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' --delete --exclude '.git' --exclude 'tmp' --exclude 'docs/superpowers' /Users/joeyang/Documents/Projects/anvil/.worktrees/m1-phase-4-test-harness/ root@47.74.37.12:/opt/anvil-m1-phase-4/
-ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'cd /opt/anvil-m1-phase-4; go test ./...'
+rsync -az -e 'ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' --delete --exclude '.git' --exclude 'tmp' --exclude 'docs/superpowers' /Users/joeyang/Documents/Projects/anvil-agent/.worktrees/m1-phase-4-test-harness/ root@47.74.37.12:/opt/anvil-agent-m1-phase-4/
+ssh -i ~/.ssh/anvil_dev_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 root@47.74.37.12 'cd /opt/anvil-agent-m1-phase-4; go test ./...'
 ```
 
 ## Tunnel Health Smoke
@@ -51,9 +51,9 @@ Expected behavior:
 ## Dashboard Guard Checks
 
 ```bash
-cd /Users/joeyang/Documents/Projects/anvil-dashboard
+cd /Users/joeyang/Documents/Projects/anvil
 pnpm --filter @anvil/server typecheck
 pnpm --filter @anvil/web typecheck
 ```
 
-Dashboard checks are guards only. M1 host-agent behavior remains owned by this repository.
+Anvil control-plane checks are guards only. M1 Anvil Agent behavior remains owned by this repository.
