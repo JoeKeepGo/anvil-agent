@@ -181,6 +181,56 @@ func TestExecutePreservesIncusResponseBody(t *testing.T) {
 	}
 }
 
+func TestExecutePreservesMalformedIncusResponseBody(t *testing.T) {
+	rawBody := `{"type":"sync"`
+	client := newTestClient(t, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(rawBody)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	resp := client.Execute(context.Background(), &ProxyRequest{
+		ID:     "malformed-body",
+		Method: http.MethodGet,
+		Path:   "/1.0",
+	})
+
+	if string(resp.Body) != rawBody {
+		t.Fatalf("body = %s, want %s", resp.Body, rawBody)
+	}
+}
+
+func TestExecuteReturnsInternalServerErrorOnResponseReadError(t *testing.T) {
+	client := newTestClient(t, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       errReadCloser{err: errors.New("read failed")},
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	resp := client.Execute(context.Background(), &ProxyRequest{
+		ID:     "read-error",
+		Method: http.MethodGet,
+		Path:   "/1.0",
+	})
+
+	if resp.ID != "read-error" {
+		t.Fatalf("id = %q, want read-error", resp.ID)
+	}
+	if resp.Status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Fatal("error is empty, want read error message")
+	}
+	if resp.Body != nil {
+		t.Fatalf("body = %s, want nil", resp.Body)
+	}
+}
+
 func TestExecuteReturnsServiceUnavailableOnIncusTransportError(t *testing.T) {
 	client := newTestClient(t, func(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("dial unix /var/lib/incus/unix.socket: connect: no such file or directory")
@@ -204,4 +254,16 @@ func TestExecuteReturnsServiceUnavailableOnIncusTransportError(t *testing.T) {
 	if resp.Body != nil {
 		t.Fatalf("body = %s, want nil", resp.Body)
 	}
+}
+
+type errReadCloser struct {
+	err error
+}
+
+func (r errReadCloser) Read(p []byte) (int, error) {
+	return 0, r.err
+}
+
+func (r errReadCloser) Close() error {
+	return nil
 }

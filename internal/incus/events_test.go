@@ -13,7 +13,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-func TestListenEventsUsesWebSocketEndpoint(t *testing.T) {
+func TestListenEventsUsesVerifiedEndpoint(t *testing.T) {
 	var requestedPath string
 	client := newWebSocketTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		requestedPath = r.URL.Path

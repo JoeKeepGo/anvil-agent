@@ -15,11 +15,16 @@ import (
 
 type Server struct {
 	cfg      *config.Config
-	incus    *incus.Client
+	incus    incusBackend
 	mu       sync.RWMutex
 	clients  map[*client]struct{}
 	eventCh  chan incus.Event
 	upgrader websocket.AcceptOptions
+}
+
+type incusBackend interface {
+	Execute(context.Context, *incus.ProxyRequest) *incus.ProxyResponse
+	ListenEvents(context.Context, chan<- incus.Event) error
 }
 
 type client struct {
@@ -109,7 +114,12 @@ func (s *Server) readLoop(c *client) {
 
 		var req incus.ProxyRequest
 		if err := json.Unmarshal(msg, &req); err != nil {
-			s.sendError(c, "", "invalid request: "+err.Error())
+			s.sendProtocolError(c, "", "invalid request: "+err.Error())
+			continue
+		}
+
+		if err := validateProxyRequest(req); err != nil {
+			s.sendProtocolError(c, req.ID, err.Error())
 			continue
 		}
 
@@ -142,6 +152,12 @@ func (s *Server) handleRequest(c *client, req *incus.ProxyRequest) {
 
 func (s *Server) sendError(c *client, id string, message string) {
 	resp := &incus.ProxyResponse{ID: id, Status: 500, Error: message}
+	data, _ := json.Marshal(resp)
+	c.conn.Write(context.Background(), websocket.MessageText, data)
+}
+
+func (s *Server) sendProtocolError(c *client, id string, message string) {
+	resp := &incus.ProxyResponse{ID: id, Status: http.StatusBadRequest, Error: message}
 	data, _ := json.Marshal(resp)
 	c.conn.Write(context.Background(), websocket.MessageText, data)
 }
