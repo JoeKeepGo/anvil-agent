@@ -17,15 +17,19 @@ type Client struct {
 
 func NewUnixClient(socketPath string) *Client {
 	return &Client{
-		http: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
-				},
-			},
-			Timeout: 30 * time.Second,
-		},
+		http: newUnixHTTPClient(socketPath),
 		base: "http://unix",
+	}
+}
+
+func newUnixHTTPClient(socketPath string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+			},
+		},
+		Timeout: 30 * time.Second,
 	}
 }
 
