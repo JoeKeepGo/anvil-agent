@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	"github.com/anvil/proxy/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/incus"
 )
 
 func TestValidateProxyRequest(t *testing.T) {

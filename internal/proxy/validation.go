@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/anvil/proxy/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/incus"
 )
 
 func validateProxyRequest(req incus.ProxyRequest) error {
