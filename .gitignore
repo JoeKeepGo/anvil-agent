@@ -42,5 +42,5 @@ coverage.out
 *.log
 
 # Local development harness and notes
-docs/
+docs/superpowers/
 CLAUDE.md

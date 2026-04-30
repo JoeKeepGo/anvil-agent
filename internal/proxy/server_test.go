@@ -223,6 +223,54 @@ func TestAcceptsIncusNestedPath(t *testing.T) {
 	}
 }
 
+func TestValidRequestWritesProxyResponse(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"write-ok","method":"GET","path":"/1.0"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.ID != "write-ok" {
+		t.Fatalf("id = %q, want write-ok", resp.ID)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if string(resp.Body) != `{"type":"sync","metadata":{}}` {
+		t.Fatalf("body = %s, want fake backend body", resp.Body)
+	}
+	if resp.Error != "" {
+		t.Fatalf("error = %q, want empty", resp.Error)
+	}
+	if *incusCalls != 1 {
+		t.Fatalf("incus calls = %d, want 1", *incusCalls)
+	}
+}
+
+func TestHandleRequestReturnsWhenClientDisconnectsBeforeResponse(t *testing.T) {
+	backend := &fakeIncusBackend{}
+	server := &Server{incus: backend}
+	clientConn, serverConn := websocketPipe(t)
+	clientConn.CloseNow()
+	defer serverConn.CloseNow()
+
+	done := make(chan struct{})
+	go func() {
+		server.handleRequest(&client{conn: serverConn, ctx: context.Background()}, &incus.ProxyRequest{
+			ID:     "disconnected",
+			Method: http.MethodGet,
+			Path:   "/1.0",
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleRequest did not return after client disconnected")
+	}
+}
+
 func TestForwardEventsBroadcastsEventToConnectedClient(t *testing.T) {
 	server, clientConn, serverConn := newEventForwardingTestServer(t)
 	defer clientConn.CloseNow()
