@@ -10,9 +10,218 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JoeKeepGo/anvil-agent/internal/config"
 	"github.com/JoeKeepGo/anvil-agent/internal/incus"
 	"github.com/coder/websocket"
 )
+
+func TestWebSocketAllowsConnectionWhenTokenUnset(t *testing.T) {
+	server := newWebSocketAuthTestServer("")
+
+	conn, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+	})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+}
+
+func TestWebSocketRejectsMissingBearerTokenWhenConfigured(t *testing.T) {
+	server := newWebSocketAuthTestServer("secret")
+
+	_, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+	})
+	if err == nil {
+		t.Fatal("dial websocket succeeded, want auth failure")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %v, want 401", responseStatus(resp))
+	}
+}
+
+func TestWebSocketRejectsWrongBearerToken(t *testing.T) {
+	server := newWebSocketAuthTestServer("secret")
+	header := http.Header{}
+	header.Set("Authorization", "Bearer wrong")
+
+	_, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+		HTTPHeader: header,
+	})
+	if err == nil {
+		t.Fatal("dial websocket succeeded, want auth failure")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %v, want 401", responseStatus(resp))
+	}
+}
+
+func TestWebSocketAcceptsCorrectBearerToken(t *testing.T) {
+	server := newWebSocketAuthTestServer("secret")
+	header := http.Header{}
+	header.Set("Authorization", "Bearer secret")
+
+	conn, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+		HTTPHeader: header,
+	})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+}
+
+func TestRejectsInvalidJSON(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	if resp.ID != "" {
+		t.Fatalf("id = %q, want empty", resp.ID)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestRejectsMissingID(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"method":"GET","path":"/1.0"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	if resp.ID != "" {
+		t.Fatalf("id = %q, want empty", resp.ID)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestRejectsMissingMethod(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"bad-method","path":"/1.0"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	if resp.ID != "bad-method" {
+		t.Fatalf("id = %q, want bad-method", resp.ID)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestRejectsUnsupportedMethod(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"bad-method","method":"TRACE","path":"/1.0"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	if resp.ID != "bad-method" {
+		t.Fatalf("id = %q, want bad-method", resp.ID)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestRejectsMissingPath(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"bad-path","method":"GET"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	if resp.ID != "bad-path" {
+		t.Fatalf("id = %q, want bad-path", resp.ID)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestRejectsPathOutsideIncusAPI(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"bad-path","method":"GET","path":"/not-incus"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	if resp.ID != "bad-path" {
+		t.Fatalf("id = %q, want bad-path", resp.ID)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestAcceptsIncusRootPath(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"ok-root","method":"GET","path":"/1.0"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if resp.ID != "ok-root" {
+		t.Fatalf("id = %q, want ok-root", resp.ID)
+	}
+	if *incusCalls != 1 {
+		t.Fatalf("incus calls = %d, want 1", *incusCalls)
+	}
+}
+
+func TestAcceptsIncusNestedPath(t *testing.T) {
+	clientConn, incusCalls := newRequestValidationClient(t)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"ok-nested","method":"GET","path":"/1.0/instances"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if resp.ID != "ok-nested" {
+		t.Fatalf("id = %q, want ok-nested", resp.ID)
+	}
+	if *incusCalls != 1 {
+		t.Fatalf("incus calls = %d, want 1", *incusCalls)
+	}
+}
 
 func TestForwardEventsBroadcastsEventToConnectedClient(t *testing.T) {
 	server, clientConn, serverConn := newEventForwardingTestServer(t)
@@ -78,6 +287,91 @@ func TestBroadcastEventContinuesWhenOneClientWriteFails(t *testing.T) {
 	}
 }
 
+func newWebSocketAuthTestServer(token string) *Server {
+	return NewServer(&config.Config{AuthToken: token}, nil)
+}
+
+func websocketAuthTestClient(server *Server) *http.Client {
+	return &http.Client{
+		Transport: websocketPipeTransport{
+			handler: server.handleWebSocket,
+		},
+	}
+}
+
+func responseStatus(resp *http.Response) interface{} {
+	if resp == nil {
+		return nil
+	}
+	return resp.StatusCode
+}
+
+func newRequestValidationClient(t *testing.T) (*websocket.Conn, *int) {
+	t.Helper()
+
+	backend := &fakeIncusBackend{}
+	server := &Server{
+		cfg:      &config.Config{},
+		incus:    backend,
+		clients:  make(map[*client]struct{}),
+		eventCh:  make(chan incus.Event, 1),
+		upgrader: websocket.AcceptOptions{InsecureSkipVerify: true},
+	}
+
+	conn, _, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+	})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	return conn, &backend.calls
+}
+
+func writeWebSocketMessage(t *testing.T, conn *websocket.Conn, msg []byte) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		t.Fatalf("write websocket message: %v", err)
+	}
+}
+
+func readProxyResponse(t *testing.T, conn *websocket.Conn) incus.ProxyResponse {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, msg, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read websocket message: %v", err)
+	}
+
+	var resp incus.ProxyResponse
+	if err := json.Unmarshal(msg, &resp); err != nil {
+		t.Fatalf("unmarshal proxy response: %v", err)
+	}
+	return resp
+}
+
+type fakeIncusBackend struct {
+	calls int
+}
+
+func (f *fakeIncusBackend) Execute(ctx context.Context, req *incus.ProxyRequest) *incus.ProxyResponse {
+	f.calls++
+	return &incus.ProxyResponse{
+		ID:     req.ID,
+		Status: http.StatusOK,
+		Body:   json.RawMessage(`{"type":"sync","metadata":{}}`),
+	}
+}
+
+func (f *fakeIncusBackend) ListenEvents(ctx context.Context, ch chan<- incus.Event) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func newEventForwardingTestServer(t *testing.T) (*Server, *websocket.Conn, *websocket.Conn) {
 	t.Helper()
 
@@ -122,13 +416,19 @@ type websocketPipeTransport struct {
 
 func (t websocketPipeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
 	recorder := httptest.NewRecorder()
 	hijacker := proxyTestHijacker{
 		ResponseRecorder: recorder,
 		conn:             serverConn,
+		done:             done,
 	}
 
-	t.handler.ServeHTTP(hijacker, r)
+	go func() {
+		t.handler.ServeHTTP(hijacker, r)
+		closeDone(done)
+	}()
+	<-done
 
 	resp := recorder.Result()
 	if resp.StatusCode == http.StatusSwitchingProtocols {
@@ -143,8 +443,18 @@ func (t websocketPipeTransport) RoundTrip(r *http.Request) (*http.Response, erro
 type proxyTestHijacker struct {
 	*httptest.ResponseRecorder
 	conn net.Conn
+	done chan struct{}
 }
 
 func (h proxyTestHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	closeDone(h.done)
 	return h.conn, bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn)), nil
+}
+
+func closeDone(done chan struct{}) {
+	select {
+	case <-done:
+	default:
+		close(done)
+	}
 }
