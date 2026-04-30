@@ -1,0 +1,16 @@
+[Unit]
+Description=Anvil host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PROXY_HOST=127.0.0.1
+Environment=PROXY_PORT=9090
+Environment=INCUS_SOCKET=/var/lib/incus/unix.socket
+ExecStart=/usr/local/bin/anvil-host-agent
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
