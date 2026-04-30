@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anvil/proxy/internal/config"
-	"github.com/anvil/proxy/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/config"
+	"github.com/JoeKeepGo/anvil-agent/internal/incus"
 	"github.com/coder/websocket"
 )
 
@@ -54,7 +54,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler: mux,
 	}
 
-	log.Printf("Anvil proxy listening on %s", s.cfg.ListenAddr())
+	log.Printf("Anvil agent listening on %s", s.cfg.ListenAddr())
 	log.Printf("Incus socket: %s", s.cfg.IncusSocket)
 
 	go func() {
