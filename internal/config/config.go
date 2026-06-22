@@ -10,6 +10,7 @@ type Config struct {
 	Port        int
 	Host        string
 	IncusSocket string
+	StateDir    string
 	AuthToken   string
 }
 
@@ -18,6 +19,7 @@ func Load() (*Config, error) {
 		Port:        9090,
 		Host:        "127.0.0.1",
 		IncusSocket: "/var/lib/incus/unix.socket",
+		StateDir:    "/var/lib/anvil-agent",
 	}
 
 	if v := os.Getenv("ANVIL_AGENT_PORT"); v != "" {
@@ -32,6 +34,9 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("INCUS_SOCKET"); v != "" {
 		cfg.IncusSocket = v
+	}
+	if v := os.Getenv("ANVIL_AGENT_STATE_DIR"); v != "" {
+		cfg.StateDir = v
 	}
 	if v := os.Getenv("ANVIL_AGENT_AUTH_TOKEN"); v != "" {
 		cfg.AuthToken = v

@@ -10,6 +10,7 @@ import (
 
 	"github.com/JoeKeepGo/anvil-agent/internal/config"
 	"github.com/JoeKeepGo/anvil-agent/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/state"
 	"github.com/coder/websocket"
 )
 
@@ -19,6 +20,7 @@ type Server struct {
 	mu       sync.RWMutex
 	clients  map[*client]struct{}
 	eventCh  chan incus.Event
+	reporter state.Reporter
 	upgrader websocket.AcceptOptions
 }
 
@@ -35,11 +37,16 @@ type client struct {
 var eventWriteTimeout = 2 * time.Second
 
 func NewServer(cfg *config.Config, incusClient *incus.Client) *Server {
+	return NewServerWithReporter(cfg, incusClient, nil)
+}
+
+func NewServerWithReporter(cfg *config.Config, incusClient incusBackend, reporter state.Reporter) *Server {
 	return &Server{
-		cfg:     cfg,
-		incus:   incusClient,
-		clients: make(map[*client]struct{}),
-		eventCh: make(chan incus.Event, 64),
+		cfg:      cfg,
+		incus:    incusClient,
+		clients:  make(map[*client]struct{}),
+		eventCh:  make(chan incus.Event, 64),
+		reporter: reporter,
 		upgrader: websocket.AcceptOptions{
 			InsecureSkipVerify: true,
 		},
@@ -60,7 +67,6 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	log.Printf("Anvil agent listening on %s", s.cfg.ListenAddr())
-	log.Printf("Incus socket: %s", s.cfg.IncusSocket)
 
 	go func() {
 		<-ctx.Done()
@@ -131,11 +137,49 @@ func (s *Server) handleRequest(c *client, req *incus.ProxyRequest) {
 	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
 	defer cancel()
 
-	resp := s.incus.Execute(ctx, req)
+	if s.isAgentRequest(req.Path) {
+		s.handleAgentRequest(c, ctx, req)
+		return
+	}
 
+	resp := s.incus.Execute(ctx, req)
+	s.writeResponse(c, req.ID, resp)
+}
+
+func (s *Server) handleAgentRequest(c *client, ctx context.Context, req *incus.ProxyRequest) {
+	if req.Path != "/agent/v1/state" {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusNotFound, Error: "unknown agent path"})
+		return
+	}
+	if req.Method != http.MethodGet {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusBadRequest, Error: "unsupported method for agent state"})
+		return
+	}
+	if s.reporter == nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "agent state reporter not configured"})
+		return
+	}
+
+	report, err := s.reporter.Report(ctx)
+	if err != nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "build agent state report: " + err.Error()})
+		return
+	}
+	body, err := json.Marshal(report)
+	if err != nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "marshal agent state report: " + err.Error()})
+		return
+	}
+	s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusOK, Body: body})
+}
+
+func (s *Server) writeResponse(c *client, id string, resp *incus.ProxyResponse) {
+	if resp == nil {
+		resp = &incus.ProxyResponse{ID: id, Status: http.StatusInternalServerError, Error: "empty response"}
+	}
 	data, err := json.Marshal(resp)
 	if err != nil {
-		s.sendError(c, req.ID, "marshal response: "+err.Error())
+		s.sendError(c, id, "marshal response: "+err.Error())
 		return
 	}
 
@@ -148,6 +192,10 @@ func (s *Server) handleRequest(c *client, req *incus.ProxyRequest) {
 	if err := c.conn.Write(writeCtx, websocket.MessageText, data); err != nil {
 		log.Printf("write response to client: %v", err)
 	}
+}
+
+func (s *Server) isAgentRequest(path string) bool {
+	return path == "/agent/v1/state" || path == "/agent/v1/" || (len(path) > len("/agent/v1/") && path[:len("/agent/v1/")] == "/agent/v1/")
 }
 
 func (s *Server) sendError(c *client, id string, message string) {

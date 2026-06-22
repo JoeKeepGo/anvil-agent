@@ -27,7 +27,7 @@ Anvil backend
       -> Incus daemon
 ```
 
-The agent is stateless. Product-level concerns such as users, teams, authorization, audit logs, and multi-host inventory belong in the Anvil control-plane backend.
+The agent persists only a host-local identity and reports browser-safe host state for trusted control-plane clients. Product-level concerns such as users, teams, authorization, audit logs, tenants, projects, endpoint inventory, and multi-host policy belong in the Anvil control-plane backend.
 
 ## Configuration
 
@@ -36,6 +36,7 @@ The agent is stateless. Product-level concerns such as users, teams, authorizati
 | `ANVIL_AGENT_HOST` | `127.0.0.1` | Host address to bind |
 | `ANVIL_AGENT_PORT` | `9090` | WebSocket port |
 | `INCUS_SOCKET` | `/var/lib/incus/unix.socket` | Incus Unix socket path |
+| `ANVIL_AGENT_STATE_DIR` | `/var/lib/anvil-agent` | Directory for the persisted host-local agent identity |
 | `ANVIL_AGENT_AUTH_TOKEN` | empty | Optional bearer token for WebSocket access |
 
 ## Run
@@ -58,6 +59,8 @@ curl http://127.0.0.1:9090/health
 
 ## Protocol Example
 
+Incus proxy request:
+
 Request:
 
 ```json
@@ -68,6 +71,18 @@ Response:
 
 ```json
 {"id":"1","status":200,"body":{"type":"sync","status":"Success","metadata":[]}}
+```
+
+Agent state request:
+
+```json
+{"id":"state-1","method":"GET","path":"/agent/v1/state"}
+```
+
+Response:
+
+```json
+{"id":"state-1","status":200,"body":{"agent":{"id":"11111111-1111-4111-8111-111111111111","version":"dev","stateSchemaVersion":1,"startedAt":"2026-06-22T00:00:00Z","reportedAt":"2026-06-22T00:00:00Z"},"host":{"hostname":"anvil-local-vm","os":"linux","arch":"arm64"},"incus":{"available":true,"statusCode":200,"serverVersion":"6.x","apiVersion":"1.0"},"capabilities":{"incusProxy":true,"events":true,"stateReport":true,"wireGuard":false,"vmLifecycle":false},"snapshot":{"instancesTotal":0,"imagesTotal":0,"operationsTotal":0}}}
 ```
 
 ## Security Model

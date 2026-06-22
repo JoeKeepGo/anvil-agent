@@ -256,6 +256,32 @@ func TestExecuteReturnsServiceUnavailableOnIncusTransportError(t *testing.T) {
 	}
 }
 
+func TestProxyResponseOmitsSuccessErrorAndIncludesNullErrorBody(t *testing.T) {
+	success, err := json.Marshal(ProxyResponse{
+		ID:     "ok",
+		Status: http.StatusOK,
+		Body:   json.RawMessage(`{"ok":true}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal success: %v", err)
+	}
+	if string(success) != `{"id":"ok","status":200,"body":{"ok":true}}` {
+		t.Fatalf("success json = %s", success)
+	}
+
+	failure, err := json.Marshal(ProxyResponse{
+		ID:     "fail",
+		Status: http.StatusInternalServerError,
+		Error:  "safe error",
+	})
+	if err != nil {
+		t.Fatalf("marshal failure: %v", err)
+	}
+	if string(failure) != `{"id":"fail","status":500,"body":null,"error":"safe error"}` {
+		t.Fatalf("failure json = %s", failure)
+	}
+}
+
 type errReadCloser struct {
 	err error
 }

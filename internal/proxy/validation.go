@@ -21,6 +21,9 @@ func validateProxyRequest(req incus.ProxyRequest) error {
 	if req.Path == "" {
 		return fmt.Errorf("missing path")
 	}
+	if req.Path == "/agent/v1/state" || strings.HasPrefix(req.Path, "/agent/v1/") {
+		return nil
+	}
 	if req.Path != "/1.0" && !strings.HasPrefix(req.Path, "/1.0/") {
 		return fmt.Errorf("path outside incus api")
 	}
