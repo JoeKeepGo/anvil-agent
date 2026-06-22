@@ -38,6 +38,11 @@ func TestValidateProxyRequest(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "unknown agent api path",
+			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/agent/v1/unknown"},
+			wantErr: false,
+		},
+		{
 			name:    "path prefix collision",
 			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/1.0foo"},
 			wantErr: true,
@@ -50,6 +55,11 @@ func TestValidateProxyRequest(t *testing.T) {
 		{
 			name:    "accepts incus nested path",
 			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/1.0/instances"},
+			wantErr: false,
+		},
+		{
+			name:    "accepts agent state path",
+			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/agent/v1/state"},
 			wantErr: false,
 		},
 		{

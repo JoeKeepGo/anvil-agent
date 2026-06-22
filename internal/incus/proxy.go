@@ -17,7 +17,7 @@ type ProxyRequest struct {
 type ProxyResponse struct {
 	ID     string          `json:"id"`
 	Status int             `json:"status"`
-	Body   json.RawMessage `json:"body,omitempty"`
+	Body   json.RawMessage `json:"body"`
 	Error  string          `json:"error,omitempty"`
 }
 

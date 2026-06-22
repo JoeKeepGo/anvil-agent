@@ -12,6 +12,7 @@ import (
 
 	"github.com/JoeKeepGo/anvil-agent/internal/config"
 	"github.com/JoeKeepGo/anvil-agent/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/state"
 	"github.com/coder/websocket"
 )
 
@@ -247,6 +248,114 @@ func TestValidRequestWritesProxyResponse(t *testing.T) {
 	}
 }
 
+func TestAgentStateRequestReturnsReportWithoutIncusProxyExecution(t *testing.T) {
+	clientConn, incusCalls := newStateRequestClient(t, "")
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"state-ok","method":"GET","path":"/agent/v1/state"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.ID != "state-ok" {
+		t.Fatalf("id = %q, want state-ok", resp.ID)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if resp.Error != "" {
+		t.Fatalf("error = %q, want empty", resp.Error)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus proxy calls = %d, want 0", *incusCalls)
+	}
+
+	var report state.Report
+	if err := json.Unmarshal(resp.Body, &report); err != nil {
+		t.Fatalf("unmarshal state report: %v", err)
+	}
+	if report.Agent.ID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("agent id = %q", report.Agent.ID)
+	}
+	if !report.Capabilities.StateReport {
+		t.Fatal("stateReport capability = false, want true")
+	}
+}
+
+func TestAgentStateRequestRequiresGET(t *testing.T) {
+	clientConn, incusCalls := newStateRequestClient(t, "")
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"state-bad-method","method":"POST","path":"/agent/v1/state"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.ID != "state-bad-method" {
+		t.Fatalf("id = %q, want state-bad-method", resp.ID)
+	}
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Fatal("error is empty, want safe error")
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus proxy calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestUnknownAgentPathReturnsSafeErrorWithoutIncusProxyExecution(t *testing.T) {
+	clientConn, incusCalls := newStateRequestClient(t, "")
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"state-unknown","method":"GET","path":"/agent/v1/unknown"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.ID != "state-unknown" {
+		t.Fatalf("id = %q, want state-unknown", resp.ID)
+	}
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Fatal("error is empty, want safe error")
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus proxy calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestAgentStateRouteUsesExistingBearerAuth(t *testing.T) {
+	server := newStateAuthTestServer("secret")
+
+	_, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+	})
+	if err == nil {
+		t.Fatal("dial websocket succeeded, want auth failure")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %v, want 401", responseStatus(resp))
+	}
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer secret")
+	conn, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+		HTTPHeader: header,
+	})
+	if err != nil {
+		t.Fatalf("dial websocket with token: %v", err)
+	}
+	defer conn.CloseNow()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+
+	writeWebSocketMessage(t, conn, []byte(`{"id":"state-auth","method":"GET","path":"/agent/v1/state"}`))
+	stateResp := readProxyResponse(t, conn)
+	if stateResp.Status != http.StatusOK {
+		t.Fatalf("state status = %d, want 200", stateResp.Status)
+	}
+}
+
 func TestHandleRequestReturnsWhenClientDisconnectsBeforeResponse(t *testing.T) {
 	backend := &fakeIncusBackend{}
 	server := &Server{incus: backend}
@@ -373,6 +482,52 @@ func newRequestValidationClient(t *testing.T) (*websocket.Conn, *int) {
 		t.Fatalf("dial websocket: %v", err)
 	}
 	return conn, &backend.calls
+}
+
+func newStateRequestClient(t *testing.T, token string) (*websocket.Conn, *int) {
+	t.Helper()
+
+	backend := &fakeIncusBackend{}
+	server := newStateAuthTestServer(token)
+	server.incus = backend
+
+	conn, _, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+	})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	return conn, &backend.calls
+}
+
+func newStateAuthTestServer(token string) *Server {
+	reporter := state.NewStaticReporter(state.Report{
+		Agent: state.AgentSummary{
+			ID:                 "11111111-1111-4111-8111-111111111111",
+			Version:            "test",
+			StateSchemaVersion: 1,
+			StartedAt:          time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC),
+			ReportedAt:         time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC),
+		},
+		Host: state.HostSummary{
+			Hostname: "test-host",
+			OS:       "linux",
+			Arch:     "arm64",
+		},
+		Incus: state.IncusSummary{
+			Available:  true,
+			StatusCode: http.StatusOK,
+		},
+		Capabilities: state.CapabilitySummary{
+			IncusProxy:  true,
+			Events:      true,
+			StateReport: true,
+			WireGuard:   false,
+			VMLifecycle: false,
+		},
+		Snapshot: state.SnapshotSummary{},
+	})
+	return NewServerWithReporter(&config.Config{AuthToken: token}, &fakeIncusBackend{}, reporter)
 }
 
 func writeWebSocketMessage(t *testing.T, conn *websocket.Conn, msg []byte) {
