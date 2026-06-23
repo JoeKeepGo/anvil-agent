@@ -83,7 +83,7 @@ Agent state request:
 Response:
 
 ```json
-{"id":"state-1","status":200,"body":{"agent":{"id":"11111111-1111-4111-8111-111111111111","version":"dev","stateSchemaVersion":1,"startedAt":"2026-06-22T00:00:00Z","reportedAt":"2026-06-22T00:00:00Z"},"host":{"hostname":"anvil-local-vm","os":"linux","arch":"arm64"},"incus":{"available":true,"statusCode":200,"serverVersion":"6.x","apiVersion":"1.0"},"capabilities":{"incusProxy":true,"events":true,"stateReport":true,"wireGuard":false,"vmLifecycle":false},"snapshot":{"instancesTotal":0,"imagesTotal":0,"operationsTotal":0}}}
+{"id":"state-1","status":200,"body":{"agent":{"id":"11111111-1111-4111-8111-111111111111","version":"dev","stateSchemaVersion":1,"startedAt":"2026-06-22T00:00:00Z","reportedAt":"2026-06-22T00:00:00Z"},"host":{"hostname":"anvil-local-vm","os":"linux","arch":"arm64"},"incus":{"available":true,"statusCode":200,"serverVersion":"6.x","apiVersion":"1.0"},"capabilities":{"incusProxy":true,"events":true,"stateReport":true,"wireGuard":false,"vmLifecycle":true},"snapshot":{"instancesTotal":0,"imagesTotal":0,"operationsTotal":0}}}
 ```
 
 ## Network Capability And Managed Apply
@@ -109,6 +109,23 @@ Network apply request (DRY_RUN performs no host mutation; APPLY validates and re
 ```
 
 Interface names must match the Anvil-managed prefix (`anvilwg` by default); requests for unmanaged interfaces, unsupported modes, malformed CIDRs, duplicate peer public keys, or oversized payloads are rejected with a safe validation error.
+
+## VM Lifecycle Protocol
+
+The agent exposes a narrow, trusted backend-to-agent VM lifecycle protocol. It dispatches only the allowlisted Incus instance operations `create`, `start`, `stop`, `restart`, and `delete`, and never exposes arbitrary Incus write paths, shell execution, snapshots, migration, console, or file operations. The agent owns lifecycle response normalization and never echoes raw Incus output, the Incus Unix socket path, tokens, host private config, or product state.
+
+Endpoint shape (trusted WS messages, not browser-public):
+
+```text
+GET  /agent/v1/lifecycle/capabilities
+POST /agent/v1/lifecycle/instances/create
+POST /agent/v1/lifecycle/instances/{name}/start
+POST /agent/v1/lifecycle/instances/{name}/stop
+POST /agent/v1/lifecycle/instances/{name}/restart
+POST /agent/v1/lifecycle/instances/{name}/delete
+```
+
+Instance names must match a DNS-label-safe allowlist and are URL-encoded into the Incus path. Create requests mirror the M13 backend VM lifecycle policy contract (`cpuCount`/`memoryBytes`/`rootDiskBytes`), fix the Incus instance type to `virtual-machine`, and emit bounded, validated limits only. Delete requires an explicit `confirm` field. Unknown JSON fields, path traversal, shell metacharacters, disallowed operation segments (e.g. `snapshot`/`exec`/`console`/`files`/`migrate`), and oversized payloads are rejected with agent-owned safe error codes. Async Incus operations are normalized to an `operationId` + `operationKind: "async"` echo with no raw Incus bytes.
 
 ## Security Model
 
