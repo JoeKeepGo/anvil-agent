@@ -883,3 +883,44 @@ func (f *fakeNetworkStateReporter) NetworkState(ctx context.Context) (network.Ne
 		},
 	}, nil
 }
+
+func TestNetworkApplyInvalidCidrDoesNotEchoSecretOverWebSocket(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	body := `{"id":"net-leak","method":"POST","path":"/agent/v1/network/apply","body":{"mode":"DRY_RUN","interface":{"name":"anvilwg0","listenPort":51820,"addresses":["PSK-MUST-NOT-LEAK/24"]},"peers":[],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}}`
+	writeWebSocketMessage(t, clientConn, []byte(body))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	lower := strings.ToLower(resp.Error)
+	if strings.Contains(lower, "psk-must-not-leak") {
+		t.Fatalf("apply error echoed raw CIDR sentinel: %s", resp.Error)
+	}
+	for _, forbidden := range []string{"preshared", "psk", "private-key", "token", "cookie", "authorization"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("apply error echoed secret-like term %q: %s", forbidden, resp.Error)
+		}
+	}
+}
+
+func TestNetworkApplyRejectsUnknownCommandFieldOverWebSocket(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	body := `{"id":"net-hook","method":"POST","path":"/agent/v1/network/apply","body":{"mode":"DRY_RUN","interface":{"name":"anvilwg0","listenPort":51820,"addresses":["10.42.0.1/24"]},"peers":[{"publicKey":"peer-public-key","allowedIps":["10.42.0.2/32"],"postUp":"iptables -F; reboot"}],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}}`
+	writeWebSocketMessage(t, clientConn, []byte(body))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for unknown peer command field", resp.Status)
+	}
+	if strings.Contains(strings.ToLower(resp.Error), "iptables") {
+		t.Fatalf("apply error echoed command text: %s", resp.Error)
+	}
+	if strings.Contains(strings.ToLower(resp.Error), "postup") {
+		t.Fatalf("apply error echoed unknown field name: %s", resp.Error)
+	}
+}

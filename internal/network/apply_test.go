@@ -243,3 +243,177 @@ func TestApplyResponsePreservesRoutingFlags(t *testing.T) {
 		t.Fatalf("routing = %+v, want both true", resp.Routing)
 	}
 }
+
+func applyBodyWith(raw map[string]any) json.RawMessage {
+	b, _ := json.Marshal(raw)
+	return b
+}
+
+func assertNoSecretEcho(t *testing.T, err error, sentinel string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	if e, ok := err.(*ApplyError); !ok || e.Status != 400 {
+		t.Fatalf("error = %v, want 400 ApplyError", err)
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, strings.ToLower(sentinel)) {
+		t.Fatalf("error echoed raw sentinel %q: %s", sentinel, err.Error())
+	}
+	for _, forbidden := range []string{"preshared", "psk", "private-key", "privatekey", "token", "cookie", "authorization", "password"} {
+		if strings.Contains(msg, forbidden) {
+			t.Fatalf("error echoed secret-like term %q: %s", forbidden, err.Error())
+		}
+	}
+}
+
+func TestApplyInvalidInterfaceAddressDoesNotEchoSecretSentinel(t *testing.T) {
+	applier := NewApplier("anvilwg")
+	body := applyBodyWith(map[string]any{
+		"mode": "DRY_RUN",
+		"interface": map[string]any{
+			"name":       "anvilwg0",
+			"listenPort": 51820,
+			"addresses":  []string{"PSK-MUST-NOT-LEAK/24"},
+		},
+		"peers":   []any{},
+		"routing": map[string]any{"ipv4Forwarding": true, "ipv6Forwarding": true},
+	})
+	_, err := applier.Apply(context.Background(), body)
+	assertNoSecretEcho(t, err, "PSK-MUST-NOT-LEAK")
+}
+
+func TestApplyInvalidPeerAllowedIpDoesNotEchoSecretSentinel(t *testing.T) {
+	applier := NewApplier("anvilwg")
+	body := applyBodyWith(map[string]any{
+		"mode": "DRY_RUN",
+		"interface": map[string]any{
+			"name":       "anvilwg0",
+			"listenPort": 51820,
+			"addresses":  []string{"10.42.0.1/24"},
+		},
+		"peers": []any{
+			map[string]any{
+				"publicKey":  "peer-public-key",
+				"allowedIps": []string{"PRIVATE-KEY-MUST-NOT-LEAK/32"},
+			},
+		},
+		"routing": map[string]any{"ipv4Forwarding": true, "ipv6Forwarding": true},
+	})
+	_, err := applier.Apply(context.Background(), body)
+	assertNoSecretEcho(t, err, "PRIVATE-KEY-MUST-NOT-LEAK")
+}
+
+func TestApplyRejectsTopLevelUnknownCommandField(t *testing.T) {
+	applier := NewApplier("anvilwg")
+	body := applyBodyWith(map[string]any{
+		"mode": "DRY_RUN",
+		"interface": map[string]any{
+			"name":       "anvilwg0",
+			"listenPort": 51820,
+			"addresses":  []string{"10.42.0.1/24"},
+		},
+		"peers":       []any{},
+		"routing":     map[string]any{"ipv4Forwarding": true, "ipv6Forwarding": true},
+		"hookCommand": "rm -rf / --no-preserve-root",
+	})
+	_, err := applier.Apply(context.Background(), body)
+	if err == nil {
+		t.Fatal("expected unknown field error for hookCommand")
+	}
+	if e, ok := err.(*ApplyError); !ok || e.Status != 400 {
+		t.Fatalf("error = %v, want 400 ApplyError", err)
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "rm -rf") {
+		t.Fatalf("error echoed command text: %s", err.Error())
+	}
+}
+
+func TestApplyRejectsPeerUnknownCommandFields(t *testing.T) {
+	applier := NewApplier("anvilwg")
+	for _, field := range []string{"postUp", "shell", "command", "preDown"} {
+		body := applyBodyWith(map[string]any{
+			"mode": "DRY_RUN",
+			"interface": map[string]any{
+				"name":       "anvilwg0",
+				"listenPort": 51820,
+				"addresses":  []string{"10.42.0.1/24"},
+			},
+			"peers": []any{
+				map[string]any{
+					"publicKey":  "peer-public-key",
+					"allowedIps": []string{"10.42.0.2/32"},
+					field:        "iptables -F; reboot",
+				},
+			},
+			"routing": map[string]any{"ipv4Forwarding": true, "ipv6Forwarding": true},
+		})
+		_, err := applier.Apply(context.Background(), body)
+		if err == nil {
+			t.Fatalf("expected unknown field error for peer field %q", field)
+		}
+		if e, ok := err.(*ApplyError); !ok || e.Status != 400 {
+			t.Fatalf("field %q error = %v, want 400 ApplyError", field, err)
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "iptables") {
+			t.Fatalf("error echoed command text for %q: %s", field, err.Error())
+		}
+	}
+}
+
+func TestApplyRejectsRoutingAndInterfaceUnknownFields(t *testing.T) {
+	applier := NewApplier("anvilwg")
+
+	routingBody := applyBodyWith(map[string]any{
+		"mode": "DRY_RUN",
+		"interface": map[string]any{
+			"name":       "anvilwg0",
+			"listenPort": 51820,
+			"addresses":  []string{"10.42.0.1/24"},
+		},
+		"peers":   []any{},
+		"routing": map[string]any{"ipv4Forwarding": true, "ipv6Forwarding": true, "natRule": "MASQUERADE"},
+	})
+	if _, err := applier.Apply(context.Background(), routingBody); err == nil {
+		t.Fatal("expected unknown field error for routing.natRule")
+	}
+
+	ifaceBody := applyBodyWith(map[string]any{
+		"mode": "DRY_RUN",
+		"interface": map[string]any{
+			"name":        "anvilwg0",
+			"listenPort":  51820,
+			"addresses":   []string{"10.42.0.1/24"},
+			"mtuOverride": 1500,
+		},
+		"peers":   []any{},
+		"routing": map[string]any{"ipv4Forwarding": true, "ipv6Forwarding": true},
+	})
+	if _, err := applier.Apply(context.Background(), ifaceBody); err == nil {
+		t.Fatal("expected unknown field error for interface.mtuOverride")
+	}
+}
+
+func TestApplyRejectsMultipleTopLevelObjects(t *testing.T) {
+	applier := NewApplier("anvilwg")
+	_, err := applier.Apply(context.Background(), json.RawMessage(`{"mode":"DRY_RUN","interface":{"name":"anvilwg0","listenPort":51820,"addresses":["10.42.0.1/24"]},"peers":[],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}{}`))
+	if err == nil {
+		t.Fatal("expected error for trailing second object")
+	}
+	if e, ok := err.(*ApplyError); !ok || e.Status != 400 {
+		t.Fatalf("error = %v, want 400 ApplyError", err)
+	}
+}
+
+func TestApplyRejectsOversizedBody(t *testing.T) {
+	applier := NewApplier("anvilwg")
+	huge := strings.Repeat(" ", maxBodyBytes+1)
+	_, err := applier.Apply(context.Background(), json.RawMessage(huge))
+	if err == nil {
+		t.Fatal("expected error for oversized body")
+	}
+	if e, ok := err.(*ApplyError); !ok || e.Status != 400 {
+		t.Fatalf("error = %v, want 400 ApplyError", err)
+	}
+}

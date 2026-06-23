@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -33,6 +34,7 @@ const (
 	maxAllowedIps    = 64
 	maxFieldBytes    = 1 << 14 // 16 KiB per string field
 	maxPeerPublicKey = 64
+	maxBodyBytes     = 1 << 20 // 1 MiB total request body
 )
 
 // InterfaceSpec is the desired Anvil-managed interface state in a request.
@@ -118,15 +120,36 @@ func NewApplier(prefix string) *Applier {
 	return &Applier{prefix: prefix}
 }
 
-// Validate parses a raw request body and returns a validated ApplyRequest or
-// a safe ApplyError.
+// Validate parses a raw request body with strict, allowlisted decoding and
+// returns a validated ApplyRequest or a safe ApplyError.
+//
+// Decoding rejects unknown fields at every object level (top-level body,
+// interface, each peer, and routing) so the declarative protocol cannot be
+// extended with arbitrary command/script/hook/path fields. Validation error
+// messages identify the field/index and validation class only and never echo
+// submitted values such as CIDRs, public keys, preshared keys, tokens,
+// cookies, private keys, or command text.
 func (a *Applier) Validate(raw json.RawMessage) (ApplyRequest, error) {
 	if len(raw) == 0 {
 		return ApplyRequest{}, NewApplyError(400, "missing request body")
 	}
+	if len(raw) > maxBodyBytes {
+		return ApplyRequest{}, NewApplyError(400, "request body too large")
+	}
 	var req ApplyRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		return ApplyRequest{}, NewApplyError(400, "invalid request body: "+err.Error())
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		// Never echo the raw decoder error: it may contain attacker-controlled
+		// field names or value fragments. Classify by validation class only.
+		message := "request body is not valid JSON"
+		if strings.Contains(err.Error(), "unknown field") {
+			message = "request body contains an unknown field"
+		}
+		return ApplyRequest{}, NewApplyError(400, message)
+	}
+	if dec.More() {
+		return ApplyRequest{}, NewApplyError(400, "request body must be a single object")
 	}
 	if err := a.validateRequest(req); err != nil {
 		return ApplyRequest{}, err
@@ -203,8 +226,11 @@ func (a *Applier) validateInterface(spec InterfaceSpec) error {
 		return NewApplyError(400, "too many interface addresses")
 	}
 	for _, addr := range spec.Addresses {
-		if err := validateCidr(addr); err != nil {
-			return NewApplyError(400, fmt.Sprintf("interface address %q is not a valid CIDR: %v", addr, err))
+		if len(addr) > maxFieldBytes {
+			return NewApplyError(400, "interface address is too long")
+		}
+		if !isValidCidr(addr) {
+			return NewApplyError(400, "interface address is not a valid CIDR")
 		}
 	}
 	return nil
@@ -230,8 +256,11 @@ func validatePeers(peers []PeerSpec) error {
 			return NewApplyError(400, fmt.Sprintf("peer %d has too many allowed IPs", i))
 		}
 		for _, cidr := range peer.AllowedIps {
-			if err := validateCidr(cidr); err != nil {
-				return NewApplyError(400, fmt.Sprintf("peer %d allowed IP %q is not a valid CIDR: %v", i, cidr, err))
+			if len(cidr) > maxFieldBytes {
+				return NewApplyError(400, fmt.Sprintf("peer %d allowed IP is too long", i))
+			}
+			if !isValidCidr(cidr) {
+				return NewApplyError(400, fmt.Sprintf("peer %d allowed IP is not a valid CIDR", i))
 			}
 		}
 	}
@@ -251,16 +280,14 @@ func isManagedInterfaceName(prefix, name string) bool {
 	return matched
 }
 
-// validateCidr validates that a string is a parseable IPv4/IPv6 CIDR in the
+// isValidCidr reports whether a string is a parseable IPv4/IPv6 CIDR in the
 // form <address>/<prefix>. Interface addresses and peer allowed IPs are host
 // addresses with a prefix length (e.g. 10.42.0.1/24), so a host address is
-// valid here; only structural/prefix validity is enforced.
-func validateCidr(value string) error {
-	if len(value) > maxFieldBytes {
-		return fmt.Errorf("CIDR too long")
-	}
+// valid here; only structural/prefix validity is enforced. It returns a
+// boolean so callers never embed the raw value in an error message.
+func isValidCidr(value string) bool {
 	if _, _, err := net.ParseCIDR(value); err != nil {
-		return err
+		return false
 	}
-	return nil
+	return true
 }
