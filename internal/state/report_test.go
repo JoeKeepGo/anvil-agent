@@ -210,3 +210,59 @@ func (f *fakeReportIncus) ListenEvents(ctx context.Context, ch chan<- incus.Even
 	<-ctx.Done()
 	return ctx.Err()
 }
+
+type fakeWireGuardDetector struct {
+	available bool
+	err       error
+}
+
+func (f fakeWireGuardDetector) WireGuardAvailable(ctx context.Context) (bool, error) {
+	return f.available, f.err
+}
+
+func TestReporterReflectsWireGuardCapabilityFromDetector(t *testing.T) {
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	reporter := NewReporter(ReporterOptions{
+		Identity: AgentIdentity{
+			ID:                 "11111111-1111-4111-8111-111111111111",
+			CreatedAt:          now,
+			StateSchemaVersion: 1,
+		},
+		Version:   "test",
+		StartedAt: now,
+		Hostname:  func() (string, error) { return "anvil-local-vm", nil },
+		Now:       func() time.Time { return now },
+		WireGuard: fakeWireGuardDetector{available: true},
+	})
+
+	report, err := reporter.Report(context.Background())
+	if err != nil {
+		t.Fatalf("Report error: %v", err)
+	}
+	if !report.Capabilities.WireGuard {
+		t.Fatal("wireGuard capability = false, want true from detector")
+	}
+}
+
+func TestReporterDefaultsWireGuardCapabilityWhenDetectorAbsent(t *testing.T) {
+	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
+	reporter := NewReporter(ReporterOptions{
+		Identity: AgentIdentity{
+			ID:                 "11111111-1111-4111-8111-111111111111",
+			CreatedAt:          now,
+			StateSchemaVersion: 1,
+		},
+		Version:   "test",
+		StartedAt: now,
+		Hostname:  func() (string, error) { return "anvil-local-vm", nil },
+		Now:       func() time.Time { return now },
+	})
+
+	report, err := reporter.Report(context.Background())
+	if err != nil {
+		t.Fatalf("Report error: %v", err)
+	}
+	if report.Capabilities.WireGuard {
+		t.Fatal("wireGuard capability = true, want false when detector absent")
+	}
+}

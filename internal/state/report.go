@@ -25,6 +25,7 @@ type ReporterOptions struct {
 	Hostname  func() (string, error)
 	Now       func() time.Time
 	Incus     incusBackend
+	WireGuard WireGuardDetector
 }
 
 type Report struct {
@@ -77,6 +78,7 @@ type reporter struct {
 	hostname  func() (string, error)
 	now       func() time.Time
 	incus     incusBackend
+	wireGuard WireGuardDetector
 }
 
 type staticReporter struct {
@@ -85,6 +87,12 @@ type staticReporter struct {
 
 type incusBackend interface {
 	Execute(context.Context, *incus.ProxyRequest) *incus.ProxyResponse
+}
+
+// WireGuardDetector reports whether the host has WireGuard readiness. It is
+// kept narrow so the state report stays decoupled from the network package.
+type WireGuardDetector interface {
+	WireGuardAvailable(context.Context) (bool, error)
 }
 
 func NewReporter(opts ReporterOptions) Reporter {
@@ -111,6 +119,7 @@ func NewReporter(opts ReporterOptions) Reporter {
 		hostname:  hostname,
 		now:       now,
 		incus:     opts.Incus,
+		wireGuard: opts.WireGuard,
 	}
 }
 
@@ -148,6 +157,12 @@ func (r *reporter) Report(ctx context.Context) (Report, error) {
 			WireGuard:   false,
 			VMLifecycle: false,
 		},
+	}
+
+	if r.wireGuard != nil {
+		if available, err := r.wireGuard.WireGuardAvailable(ctx); err == nil {
+			report.Capabilities.WireGuard = available
+		}
 	}
 
 	if r.incus == nil {
