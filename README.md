@@ -38,6 +38,7 @@ The agent persists only a host-local identity and reports browser-safe host stat
 | `INCUS_SOCKET` | `/var/lib/incus/unix.socket` | Incus Unix socket path |
 | `ANVIL_AGENT_STATE_DIR` | `/var/lib/anvil-agent` | Directory for the persisted host-local agent identity |
 | `ANVIL_AGENT_AUTH_TOKEN` | empty | Optional bearer token for WebSocket access |
+| `ANVIL_AGENT_MANAGED_INTERFACE_PREFIX` | `anvilwg` | Prefix for Anvil-managed WireGuard interfaces (e.g. `anvilwg0`) |
 
 ## Run
 
@@ -84,6 +85,30 @@ Response:
 ```json
 {"id":"state-1","status":200,"body":{"agent":{"id":"11111111-1111-4111-8111-111111111111","version":"dev","stateSchemaVersion":1,"startedAt":"2026-06-22T00:00:00Z","reportedAt":"2026-06-22T00:00:00Z"},"host":{"hostname":"anvil-local-vm","os":"linux","arch":"arm64"},"incus":{"available":true,"statusCode":200,"serverVersion":"6.x","apiVersion":"1.0"},"capabilities":{"incusProxy":true,"events":true,"stateReport":true,"wireGuard":false,"vmLifecycle":false},"snapshot":{"instancesTotal":0,"imagesTotal":0,"operationsTotal":0}}}
 ```
+
+## Network Capability And Managed Apply
+
+The agent reports Anvil-managed WireGuard/network readiness and accepts a narrow, allowlisted dry-run/apply protocol for Anvil-managed interfaces only. It never executes arbitrary shell text, never takes over unmanaged interfaces such as `wg0`/`eth0`, never mutates Incus instance NICs, and never exposes WireGuard private keys or preshared keys.
+
+Network state request:
+
+```json
+{"id":"net-state","method":"GET","path":"/agent/v1/network/state"}
+```
+
+Response (browser-safe; private keys and preshared keys are never included):
+
+```json
+{"id":"net-state","status":200,"body":{"agent":{"id":"11111111-1111-4111-8111-111111111111","stateSchemaVersion":1},"network":{"wireGuardAvailable":true,"ipCommandAvailable":true,"iptablesAvailable":true,"ip6tablesAvailable":true,"forwarding":{"ipv4":true,"ipv6":true},"managedInterfaces":[]}}}
+```
+
+Network apply request (DRY_RUN performs no host mutation; APPLY validates and renders a plan deferred to the managed-service integration):
+
+```json
+{"id":"net-apply","method":"POST","path":"/agent/v1/network/apply","body":{"mode":"DRY_RUN","interface":{"name":"anvilwg0","listenPort":51820,"addresses":["10.42.0.1/24"]},"peers":[{"publicKey":"<peer-public-key>","allowedIps":["10.42.0.2/32"]}],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}}
+```
+
+Interface names must match the Anvil-managed prefix (`anvilwg` by default); requests for unmanaged interfaces, unsupported modes, malformed CIDRs, duplicate peer public keys, or oversized payloads are rejected with a safe validation error.
 
 ## Security Model
 

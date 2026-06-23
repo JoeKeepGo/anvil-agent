@@ -80,3 +80,24 @@ func TestLoadIgnoresLegacyProxyEnvironment(t *testing.T) {
 		t.Fatalf("auth token = %q, want empty token", cfg.AuthToken)
 	}
 }
+
+func TestLoadDefaultsManagedInterfacePrefix(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ManagedInterfacePrefix != "anvilwg" {
+		t.Fatalf("managed interface prefix = %q, want anvilwg", cfg.ManagedInterfacePrefix)
+	}
+}
+
+func TestLoadUsesManagedInterfacePrefixEnvironment(t *testing.T) {
+	t.Setenv("ANVIL_AGENT_MANAGED_INTERFACE_PREFIX", "anvilmesh")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ManagedInterfacePrefix != "anvilmesh" {
+		t.Fatalf("managed interface prefix = %q, want anvilmesh", cfg.ManagedInterfacePrefix)
+	}
+}

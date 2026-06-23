@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/JoeKeepGo/anvil-agent/internal/config"
 	"github.com/JoeKeepGo/anvil-agent/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/network"
 	"github.com/JoeKeepGo/anvil-agent/internal/state"
 	"github.com/coder/websocket"
 )
@@ -659,5 +661,266 @@ func closeDone(done chan struct{}) {
 	case <-done:
 	default:
 		close(done)
+	}
+}
+
+func TestNetworkStateRequestReturnsSafeShapeWithoutIncusProxyExecution(t *testing.T) {
+	clientConn, incusCalls := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"net-state","method":"GET","path":"/agent/v1/network/state"}`))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.ID != "net-state" {
+		t.Fatalf("id = %q, want net-state", resp.ID)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	if resp.Error != "" {
+		t.Fatalf("error = %q, want empty", resp.Error)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus proxy calls = %d, want 0", *incusCalls)
+	}
+
+	var state network.NetworkState
+	if err := json.Unmarshal(resp.Body, &state); err != nil {
+		t.Fatalf("unmarshal network state: %v", err)
+	}
+	if state.Agent.ID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("agent id = %q", state.Agent.ID)
+	}
+	if !state.Network.WireGuardAvailable {
+		t.Fatal("wireGuardAvailable = false, want true")
+	}
+	serialized := string(resp.Body)
+	if strings.Contains(strings.ToLower(serialized), "private") {
+		t.Fatalf("network state body leaked private material: %s", serialized)
+	}
+}
+
+func TestNetworkStateRequestRequiresGET(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"net-state-post","method":"POST","path":"/agent/v1/network/state"}`))
+	resp := readProxyResponse(t, clientConn)
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+}
+
+func TestNetworkStateNotConfiguredReturnsServiceUnavailable(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", false)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"net-state-503","method":"GET","path":"/agent/v1/network/state"}`))
+	resp := readProxyResponse(t, clientConn)
+	if resp.Status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.Status)
+	}
+}
+
+func TestNetworkApplyDryRunReturnsPlanWithoutMutation(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	body := `{"id":"net-apply","method":"POST","path":"/agent/v1/network/apply","body":{"mode":"DRY_RUN","interface":{"name":"anvilwg0","listenPort":51820,"addresses":["10.42.0.1/24"]},"peers":[{"publicKey":"peer-public-key","allowedIps":["10.42.0.2/32"]}],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}}`
+	writeWebSocketMessage(t, clientConn, []byte(body))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.ID != "net-apply" {
+		t.Fatalf("id = %q, want net-apply", resp.ID)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Status)
+	}
+	var result network.ApplyResponse
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal apply response: %v", err)
+	}
+	if result.Mode != network.ModeDryRun {
+		t.Fatalf("mode = %q, want DRY_RUN", result.Mode)
+	}
+	if result.Interface.Name != "anvilwg0" {
+		t.Fatalf("interface name = %q", result.Interface.Name)
+	}
+	serialized := string(resp.Body)
+	if strings.Contains(strings.ToLower(serialized), "preshared") {
+		t.Fatalf("apply response leaked preshared material: %s", serialized)
+	}
+}
+
+func TestNetworkApplyRejectsUnmanagedInterface(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	body := `{"id":"net-apply-bad","method":"POST","path":"/agent/v1/network/apply","body":{"mode":"DRY_RUN","interface":{"name":"wg0","listenPort":51820,"addresses":["10.42.0.1/24"]},"peers":[],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}}`
+	writeWebSocketMessage(t, clientConn, []byte(body))
+	resp := readProxyResponse(t, clientConn)
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for unmanaged interface", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Fatal("error is empty, want safe validation error")
+	}
+}
+
+func TestNetworkApplyRequiresPOST(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"net-apply-get","method":"GET","path":"/agent/v1/network/apply"}`))
+	resp := readProxyResponse(t, clientConn)
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+}
+
+func TestUnknownNetworkAgentPathReturnsSafeError(t *testing.T) {
+	clientConn, incusCalls := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	writeWebSocketMessage(t, clientConn, []byte(`{"id":"net-unknown","method":"GET","path":"/agent/v1/network/unknown"}`))
+	resp := readProxyResponse(t, clientConn)
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.Status)
+	}
+	if *incusCalls != 0 {
+		t.Fatalf("incus proxy calls = %d, want 0", *incusCalls)
+	}
+}
+
+func TestNetworkStateRouteUsesExistingBearerAuth(t *testing.T) {
+	server := newNetworkAuthTestServer("secret", true)
+
+	_, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+	})
+	if err == nil {
+		t.Fatal("dial websocket succeeded, want auth failure")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %v, want 401", responseStatus(resp))
+	}
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer secret")
+	conn, resp, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+		HTTPHeader: header,
+	})
+	if err != nil {
+		t.Fatalf("dial websocket with token: %v", err)
+	}
+	defer conn.CloseNow()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+
+	writeWebSocketMessage(t, conn, []byte(`{"id":"net-state-auth","method":"GET","path":"/agent/v1/network/state"}`))
+	stateResp := readProxyResponse(t, conn)
+	if stateResp.Status != http.StatusOK {
+		t.Fatalf("network state status = %d, want 200", stateResp.Status)
+	}
+}
+
+func newNetworkRequestClient(t *testing.T, token string, withNetwork bool) (*websocket.Conn, *int) {
+	t.Helper()
+
+	backend := &fakeIncusBackend{}
+	server := newNetworkAuthTestServer(token, withNetwork)
+	server.incus = backend
+
+	conn, _, err := websocket.Dial(context.Background(), "ws://example.com/ws", &websocket.DialOptions{
+		HTTPClient: websocketAuthTestClient(server),
+	})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	return conn, &backend.calls
+}
+
+func newNetworkAuthTestServer(token string, withNetwork bool) *Server {
+	reporter := state.NewStaticReporter(state.Report{
+		Agent: state.AgentSummary{
+			ID:                 "11111111-1111-4111-8111-111111111111",
+			Version:            "test",
+			StateSchemaVersion: 1,
+			StartedAt:          time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC),
+			ReportedAt:         time.Date(2026, 6, 22, 0, 0, 0, 0, time.UTC),
+		},
+		Host:         state.HostSummary{Hostname: "test-host", OS: "linux", Arch: "arm64"},
+		Incus:        state.IncusSummary{Available: true, StatusCode: http.StatusOK},
+		Capabilities: state.CapabilitySummary{IncusProxy: true, Events: true, StateReport: true},
+		Snapshot:     state.SnapshotSummary{},
+	})
+	var netState NetworkStateReporter
+	var netApplier NetworkApplier
+	if withNetwork {
+		netState = &fakeNetworkStateReporter{}
+		netApplier = network.NewApplier("anvilwg")
+	}
+	return NewServerWithNetwork(&config.Config{AuthToken: token}, &fakeIncusBackend{}, reporter, netState, netApplier)
+}
+
+type fakeNetworkStateReporter struct{}
+
+func (f *fakeNetworkStateReporter) NetworkState(ctx context.Context) (network.NetworkState, error) {
+	return network.NetworkState{
+		Agent: network.AgentSummary{
+			ID:                 "11111111-1111-4111-8111-111111111111",
+			StateSchemaVersion: 1,
+		},
+		Network: network.NetworkSummary{
+			WireGuardAvailable: true,
+			IPCommandAvailable: true,
+			IPTablesAvailable:  true,
+			IP6TablesAvailable: true,
+			Forwarding:         network.ForwardingState{IPv4: true, IPv6: true},
+			ManagedInterfaces:  []network.ManagedInterface{},
+		},
+	}, nil
+}
+
+func TestNetworkApplyInvalidCidrDoesNotEchoSecretOverWebSocket(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	body := `{"id":"net-leak","method":"POST","path":"/agent/v1/network/apply","body":{"mode":"DRY_RUN","interface":{"name":"anvilwg0","listenPort":51820,"addresses":["PSK-MUST-NOT-LEAK/24"]},"peers":[],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}}`
+	writeWebSocketMessage(t, clientConn, []byte(body))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Status)
+	}
+	lower := strings.ToLower(resp.Error)
+	if strings.Contains(lower, "psk-must-not-leak") {
+		t.Fatalf("apply error echoed raw CIDR sentinel: %s", resp.Error)
+	}
+	for _, forbidden := range []string{"preshared", "psk", "private-key", "token", "cookie", "authorization"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("apply error echoed secret-like term %q: %s", forbidden, resp.Error)
+		}
+	}
+}
+
+func TestNetworkApplyRejectsUnknownCommandFieldOverWebSocket(t *testing.T) {
+	clientConn, _ := newNetworkRequestClient(t, "", true)
+	defer clientConn.CloseNow()
+
+	body := `{"id":"net-hook","method":"POST","path":"/agent/v1/network/apply","body":{"mode":"DRY_RUN","interface":{"name":"anvilwg0","listenPort":51820,"addresses":["10.42.0.1/24"]},"peers":[{"publicKey":"peer-public-key","allowedIps":["10.42.0.2/32"],"postUp":"iptables -F; reboot"}],"routing":{"ipv4Forwarding":true,"ipv6Forwarding":true}}}`
+	writeWebSocketMessage(t, clientConn, []byte(body))
+	resp := readProxyResponse(t, clientConn)
+
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for unknown peer command field", resp.Status)
+	}
+	if strings.Contains(strings.ToLower(resp.Error), "iptables") {
+		t.Fatalf("apply error echoed command text: %s", resp.Error)
+	}
+	if strings.Contains(strings.ToLower(resp.Error), "postup") {
+		t.Fatalf("apply error echoed unknown field name: %s", resp.Error)
 	}
 }

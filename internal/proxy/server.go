@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -10,23 +11,37 @@ import (
 
 	"github.com/JoeKeepGo/anvil-agent/internal/config"
 	"github.com/JoeKeepGo/anvil-agent/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/network"
 	"github.com/JoeKeepGo/anvil-agent/internal/state"
 	"github.com/coder/websocket"
 )
 
 type Server struct {
-	cfg      *config.Config
-	incus    incusBackend
-	mu       sync.RWMutex
-	clients  map[*client]struct{}
-	eventCh  chan incus.Event
-	reporter state.Reporter
-	upgrader websocket.AcceptOptions
+	cfg            *config.Config
+	incus          incusBackend
+	mu             sync.RWMutex
+	clients        map[*client]struct{}
+	eventCh        chan incus.Event
+	reporter       state.Reporter
+	networkState   NetworkStateReporter
+	networkApplier NetworkApplier
+	upgrader       websocket.AcceptOptions
 }
 
 type incusBackend interface {
 	Execute(context.Context, *incus.ProxyRequest) *incus.ProxyResponse
 	ListenEvents(context.Context, chan<- incus.Event) error
+}
+
+// NetworkStateReporter builds the trusted /agent/v1/network/state report.
+type NetworkStateReporter interface {
+	NetworkState(context.Context) (network.NetworkState, error)
+}
+
+// NetworkApplier validates and plans Anvil-managed network apply requests.
+// It never executes arbitrary shell text.
+type NetworkApplier interface {
+	Apply(context.Context, json.RawMessage) (network.ApplyResponse, error)
 }
 
 type client struct {
@@ -47,6 +62,29 @@ func NewServerWithReporter(cfg *config.Config, incusClient incusBackend, reporte
 		clients:  make(map[*client]struct{}),
 		eventCh:  make(chan incus.Event, 64),
 		reporter: reporter,
+		upgrader: websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		},
+	}
+}
+
+// NewServerWithNetwork wires the trusted state reporter and the Anvil-managed
+// network state reporter and applier alongside the Incus backend.
+func NewServerWithNetwork(
+	cfg *config.Config,
+	incusClient incusBackend,
+	reporter state.Reporter,
+	networkState NetworkStateReporter,
+	networkApplier NetworkApplier,
+) *Server {
+	return &Server{
+		cfg:            cfg,
+		incus:          incusClient,
+		clients:        make(map[*client]struct{}),
+		eventCh:        make(chan incus.Event, 64),
+		reporter:       reporter,
+		networkState:   networkState,
+		networkApplier: networkApplier,
 		upgrader: websocket.AcceptOptions{
 			InsecureSkipVerify: true,
 		},
@@ -147,10 +185,19 @@ func (s *Server) handleRequest(c *client, req *incus.ProxyRequest) {
 }
 
 func (s *Server) handleAgentRequest(c *client, ctx context.Context, req *incus.ProxyRequest) {
-	if req.Path != "/agent/v1/state" {
+	switch req.Path {
+	case "/agent/v1/state":
+		s.handleAgentState(c, ctx, req)
+	case "/agent/v1/network/state":
+		s.handleNetworkState(c, ctx, req)
+	case "/agent/v1/network/apply":
+		s.handleNetworkApply(c, ctx, req)
+	default:
 		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusNotFound, Error: "unknown agent path"})
-		return
 	}
+}
+
+func (s *Server) handleAgentState(c *client, ctx context.Context, req *incus.ProxyRequest) {
 	if req.Method != http.MethodGet {
 		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusBadRequest, Error: "unsupported method for agent state"})
 		return
@@ -168,6 +215,55 @@ func (s *Server) handleAgentRequest(c *client, ctx context.Context, req *incus.P
 	body, err := json.Marshal(report)
 	if err != nil {
 		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "marshal agent state report: " + err.Error()})
+		return
+	}
+	s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusOK, Body: body})
+}
+
+func (s *Server) handleNetworkState(c *client, ctx context.Context, req *incus.ProxyRequest) {
+	if req.Method != http.MethodGet {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusBadRequest, Error: "unsupported method for network state"})
+		return
+	}
+	if s.networkState == nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusServiceUnavailable, Error: "network state reporter not configured"})
+		return
+	}
+	state, err := s.networkState.NetworkState(ctx)
+	if err != nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "build network state report: " + err.Error()})
+		return
+	}
+	body, err := json.Marshal(state)
+	if err != nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "marshal network state report: " + err.Error()})
+		return
+	}
+	s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusOK, Body: body})
+}
+
+func (s *Server) handleNetworkApply(c *client, ctx context.Context, req *incus.ProxyRequest) {
+	if req.Method != http.MethodPost {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusBadRequest, Error: "unsupported method for network apply"})
+		return
+	}
+	if s.networkApplier == nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusServiceUnavailable, Error: "network applier not configured"})
+		return
+	}
+	result, err := s.networkApplier.Apply(ctx, req.Body)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if applyErr, ok := err.(*network.ApplyError); ok {
+			status = applyErr.Status
+			err = fmt.Errorf("%s", applyErr.Message)
+		}
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: status, Error: err.Error()})
+		return
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "marshal network apply response: " + err.Error()})
 		return
 	}
 	s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusOK, Body: body})
