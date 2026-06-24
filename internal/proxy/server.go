@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/JoeKeepGo/anvil-agent/internal/config"
 	"github.com/JoeKeepGo/anvil-agent/internal/incus"
+	"github.com/JoeKeepGo/anvil-agent/internal/lifecycle"
 	"github.com/JoeKeepGo/anvil-agent/internal/network"
 	"github.com/JoeKeepGo/anvil-agent/internal/state"
 	"github.com/coder/websocket"
@@ -25,12 +27,22 @@ type Server struct {
 	reporter       state.Reporter
 	networkState   NetworkStateReporter
 	networkApplier NetworkApplier
+	lifecycle      LifecycleService
 	upgrader       websocket.AcceptOptions
 }
 
 type incusBackend interface {
 	Execute(context.Context, *incus.ProxyRequest) *incus.ProxyResponse
 	ListenEvents(context.Context, chan<- incus.Event) error
+}
+
+// LifecycleService validates and dispatches trusted VM lifecycle requests
+// for the allowlisted Incus instance operations (create/start/stop/restart/
+// delete). It never performs arbitrary Incus writes, shell execution,
+// snapshots, migration, console, or file operations.
+type LifecycleService interface {
+	Handle(ctx context.Context, method string, path string, body json.RawMessage) lifecycle.Result
+	Capabilities() lifecycle.CapabilitiesResponse
 }
 
 // NetworkStateReporter builds the trusted /agent/v1/network/state report.
@@ -85,6 +97,31 @@ func NewServerWithNetwork(
 		reporter:       reporter,
 		networkState:   networkState,
 		networkApplier: networkApplier,
+		upgrader: websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		},
+	}
+}
+
+// NewServerWithLifecycle wires the trusted VM lifecycle service alongside the
+// existing state reporter/network components.
+func NewServerWithLifecycle(
+	cfg *config.Config,
+	incusClient incusBackend,
+	reporter state.Reporter,
+	networkState NetworkStateReporter,
+	networkApplier NetworkApplier,
+	lifecycleSvc LifecycleService,
+) *Server {
+	return &Server{
+		cfg:            cfg,
+		incus:          incusClient,
+		clients:        make(map[*client]struct{}),
+		eventCh:        make(chan incus.Event, 64),
+		reporter:       reporter,
+		networkState:   networkState,
+		networkApplier: networkApplier,
+		lifecycle:      lifecycleSvc,
 		upgrader: websocket.AcceptOptions{
 			InsecureSkipVerify: true,
 		},
@@ -185,16 +222,59 @@ func (s *Server) handleRequest(c *client, req *incus.ProxyRequest) {
 }
 
 func (s *Server) handleAgentRequest(c *client, ctx context.Context, req *incus.ProxyRequest) {
-	switch req.Path {
-	case "/agent/v1/state":
+	switch {
+	case req.Path == "/agent/v1/lifecycle/capabilities" || strings.HasPrefix(req.Path, "/agent/v1/lifecycle/"):
+		s.handleLifecycle(c, ctx, req)
+	case req.Path == "/agent/v1/state":
 		s.handleAgentState(c, ctx, req)
-	case "/agent/v1/network/state":
+	case req.Path == "/agent/v1/network/state":
 		s.handleNetworkState(c, ctx, req)
-	case "/agent/v1/network/apply":
+	case req.Path == "/agent/v1/network/apply":
 		s.handleNetworkApply(c, ctx, req)
 	default:
 		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusNotFound, Error: "unknown agent path"})
 	}
+}
+
+func (s *Server) handleLifecycle(c *client, ctx context.Context, req *incus.ProxyRequest) {
+	if s.lifecycle == nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusServiceUnavailable, Error: "lifecycle service not configured"})
+		return
+	}
+	// Capabilities is a safe GET advertisement; it requires no body and never
+	// reaches the Incus backend.
+	if req.Path == "/agent/v1/lifecycle/capabilities" {
+		if req.Method != http.MethodGet {
+			s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusBadRequest, Error: "unsupported method for lifecycle capabilities"})
+			return
+		}
+		body, err := json.Marshal(s.lifecycle.Capabilities())
+		if err != nil {
+			s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusInternalServerError, Error: "marshal lifecycle capabilities"})
+			return
+		}
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{ID: req.ID, Status: http.StatusOK, Body: body})
+		return
+	}
+
+	result := s.lifecycle.Handle(ctx, req.Method, req.Path, req.Body)
+	if result.Err != nil {
+		s.writeResponse(c, req.ID, &incus.ProxyResponse{
+			ID:     req.ID,
+			Status: result.Err.Status,
+			Error:  result.Err.Error(),
+		})
+		return
+	}
+	status := result.Status
+	if status == 0 {
+		status = http.StatusServiceUnavailable
+	}
+	s.writeResponse(c, req.ID, &incus.ProxyResponse{
+		ID:     req.ID,
+		Status: status,
+		Body:   result.Body,
+	})
 }
 
 func (s *Server) handleAgentState(c *client, ctx context.Context, req *incus.ProxyRequest) {
