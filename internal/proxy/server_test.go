@@ -190,39 +190,44 @@ func TestRejectsPathOutsideIncusAPI(t *testing.T) {
 	}
 }
 
-func TestAcceptsIncusRootPath(t *testing.T) {
-	clientConn, incusCalls := newRequestValidationClient(t)
-	defer clientConn.CloseNow()
-
-	writeWebSocketMessage(t, clientConn, []byte(`{"id":"ok-root","method":"GET","path":"/1.0"}`))
-	resp := readProxyResponse(t, clientConn)
-
-	if resp.Status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.Status)
+func TestAcceptsAllowedGenericIncusReadPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		path string
+	}{
+		{name: "root", id: "ok-root", path: "/1.0"},
+		{name: "instances list", id: "ok-instances", path: "/1.0/instances"},
+		{name: "instance detail", id: "ok-instance-detail", path: "/1.0/instances/demo"},
+		{name: "images list", id: "ok-images", path: "/1.0/images"},
+		{name: "images recursion", id: "ok-images-recursion", path: "/1.0/images?recursion=1"},
+		{name: "image detail", id: "ok-image-detail", path: "/1.0/images/fingerprint"},
+		{name: "operations list", id: "ok-operations", path: "/1.0/operations"},
+		{name: "operation detail", id: "ok-operation-detail", path: "/1.0/operations/op-1"},
 	}
-	if resp.ID != "ok-root" {
-		t.Fatalf("id = %q, want ok-root", resp.ID)
-	}
-	if *incusCalls != 1 {
-		t.Fatalf("incus calls = %d, want 1", *incusCalls)
-	}
-}
 
-func TestAcceptsIncusNestedPath(t *testing.T) {
-	clientConn, incusCalls := newRequestValidationClient(t)
-	defer clientConn.CloseNow()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientConn, incusCalls := newRequestValidationClient(t)
+			defer clientConn.CloseNow()
 
-	writeWebSocketMessage(t, clientConn, []byte(`{"id":"ok-nested","method":"GET","path":"/1.0/instances"}`))
-	resp := readProxyResponse(t, clientConn)
+			message, err := json.Marshal(incus.ProxyRequest{ID: tt.id, Method: http.MethodGet, Path: tt.path})
+			if err != nil {
+				t.Fatalf("marshal proxy request: %v", err)
+			}
+			writeWebSocketMessage(t, clientConn, message)
+			resp := readProxyResponse(t, clientConn)
 
-	if resp.Status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.Status)
-	}
-	if resp.ID != "ok-nested" {
-		t.Fatalf("id = %q, want ok-nested", resp.ID)
-	}
-	if *incusCalls != 1 {
-		t.Fatalf("incus calls = %d, want 1", *incusCalls)
+			if resp.Status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.Status)
+			}
+			if resp.ID != tt.id {
+				t.Fatalf("id = %q, want %s", resp.ID, tt.id)
+			}
+			if *incusCalls != 1 {
+				t.Fatalf("incus calls = %d, want 1", *incusCalls)
+			}
+		})
 	}
 }
 
@@ -247,6 +252,135 @@ func TestValidRequestWritesProxyResponse(t *testing.T) {
 	}
 	if *incusCalls != 1 {
 		t.Fatalf("incus calls = %d, want 1", *incusCalls)
+	}
+}
+
+func TestRejectsRawGenericIncusWriteMethodsWithoutProxyExecution(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		id      string
+	}{
+		{
+			name:    "post state",
+			id:      "raw-post",
+			message: `{"id":"raw-post","method":"POST","path":"/1.0/instances/web/state","body":{"action":"start"}}`,
+		},
+		{
+			name:    "put profile",
+			id:      "raw-put",
+			message: `{"id":"raw-put","method":"PUT","path":"/1.0/profiles/default","body":{"config":{"raw":"write"}}}`,
+		},
+		{
+			name:    "patch instance",
+			id:      "raw-patch",
+			message: `{"id":"raw-patch","method":"PATCH","path":"/1.0/instances/web","body":{"config":{"limits.cpu":"2"}}}`,
+		},
+		{
+			name:    "delete instance",
+			id:      "raw-delete",
+			message: `{"id":"raw-delete","method":"DELETE","path":"/1.0/instances/web"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientConn, incusCalls := newRequestValidationClient(t)
+			defer clientConn.CloseNow()
+
+			writeWebSocketMessage(t, clientConn, []byte(tt.message))
+			resp := readProxyResponse(t, clientConn)
+
+			if resp.ID != tt.id {
+				t.Fatalf("id = %q, want %s", resp.ID, tt.id)
+			}
+			if resp.Status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.Status)
+			}
+			if resp.Error == "" {
+				t.Fatal("error is empty, want safe validation error")
+			}
+			if strings.Contains(resp.Error, "/1.0/") || strings.Contains(strings.ToLower(resp.Error), "raw") {
+				t.Fatalf("error leaked request detail: %q", resp.Error)
+			}
+			if *incusCalls != 0 {
+				t.Fatalf("incus calls = %d, want 0", *incusCalls)
+			}
+		})
+	}
+}
+
+func TestRejectsUnsupportedGenericIncusReadSubresourcesWithoutProxyExecution(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		path string
+	}{
+		{
+			name: "instance snapshots",
+			id:   "raw-read-snapshots",
+			path: "/1.0/instances/vm/snapshots",
+		},
+		{
+			name: "instance state",
+			id:   "raw-read-state",
+			path: "/1.0/instances/vm/state",
+		},
+		{
+			name: "instance logs",
+			id:   "raw-read-logs",
+			path: "/1.0/instances/vm/logs",
+		},
+		{
+			name: "image export",
+			id:   "raw-read-image-export",
+			path: "/1.0/images/fp/export",
+		},
+		{
+			name: "operation wait",
+			id:   "raw-read-operation-wait",
+			path: "/1.0/operations/op/wait",
+		},
+		{
+			name: "unsupported query",
+			id:   "raw-read-query",
+			path: "/1.0/images?project=default",
+		},
+		{
+			name: "unsupported family",
+			id:   "raw-read-family",
+			path: "/1.0/certificates",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientConn, incusCalls := newRequestValidationClient(t)
+			defer clientConn.CloseNow()
+
+			message, err := json.Marshal(incus.ProxyRequest{ID: tt.id, Method: http.MethodGet, Path: tt.path})
+			if err != nil {
+				t.Fatalf("marshal proxy request: %v", err)
+			}
+			writeWebSocketMessage(t, clientConn, message)
+			resp := readProxyResponse(t, clientConn)
+
+			if resp.ID != tt.id {
+				t.Fatalf("id = %q, want %s", resp.ID, tt.id)
+			}
+			if resp.Status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.Status)
+			}
+			if resp.Error == "" {
+				t.Fatal("error is empty, want safe validation error")
+			}
+			if strings.Contains(resp.Error, "/1.0/") || strings.Contains(strings.ToLower(resp.Error), "raw") {
+				t.Fatalf("error leaked request detail: %q", resp.Error)
+			}
+			if *incusCalls != 0 {
+				t.Fatalf("incus calls = %d, want 0", *incusCalls)
+			}
+		})
 	}
 }
 
@@ -592,14 +726,15 @@ func newEventForwardingTestServer(t *testing.T) (*Server, *websocket.Conn, *webs
 func websocketPipe(t *testing.T) (*websocket.Conn, *websocket.Conn) {
 	t.Helper()
 
-	var serverConn *websocket.Conn
+	accepted := make(chan *websocket.Conn, 1)
 	transport := websocketPipeTransport{
 		handler: func(w http.ResponseWriter, r *http.Request) {
-			var err error
-			serverConn, err = websocket.Accept(w, r, nil)
+			serverConn, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				t.Errorf("accept websocket: %v", err)
+				return
 			}
+			accepted <- serverConn
 		},
 	}
 
@@ -609,10 +744,15 @@ func websocketPipe(t *testing.T) (*websocket.Conn, *websocket.Conn) {
 	if err != nil {
 		t.Fatalf("dial websocket pipe: %v", err)
 	}
-	if serverConn == nil {
+
+	select {
+	case serverConn := <-accepted:
+		return clientConn, serverConn
+	case <-time.After(time.Second):
+		clientConn.CloseNow()
 		t.Fatal("server websocket was not accepted")
 	}
-	return clientConn, serverConn
+	return nil, nil
 }
 
 type websocketPipeTransport struct {
