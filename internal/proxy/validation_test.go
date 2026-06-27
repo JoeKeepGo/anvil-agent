@@ -58,29 +58,44 @@ func TestValidateProxyRequest(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "accepts incus image read query",
+			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/1.0/images?recursion=1"},
+			wantErr: false,
+		},
+		{
+			name:    "accepts incus encoded instance detail read",
+			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/1.0/instances/demo%20name"},
+			wantErr: false,
+		},
+		{
+			name:    "rejects unsupported incus read path",
+			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/1.0/certificates"},
+			wantErr: true,
+		},
+		{
 			name:    "accepts agent state path",
 			req:     incus.ProxyRequest{ID: "req-1", Method: "GET", Path: "/agent/v1/state"},
 			wantErr: false,
 		},
 		{
-			name:    "accepts post",
+			name:    "rejects raw incus post write",
 			req:     incus.ProxyRequest{ID: "req-1", Method: "POST", Path: "/1.0/instances/web/state"},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
-			name:    "accepts put",
+			name:    "rejects raw incus put write",
 			req:     incus.ProxyRequest{ID: "req-1", Method: "PUT", Path: "/1.0/profiles/default"},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
-			name:    "accepts patch",
+			name:    "rejects raw incus patch write",
 			req:     incus.ProxyRequest{ID: "req-1", Method: "PATCH", Path: "/1.0/instances/web"},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
-			name:    "accepts delete",
+			name:    "rejects raw incus delete write",
 			req:     incus.ProxyRequest{ID: "req-1", Method: "DELETE", Path: "/1.0/instances/web"},
-			wantErr: false,
+			wantErr: true,
 		},
 	}
 

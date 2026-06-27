@@ -250,6 +250,61 @@ func TestValidRequestWritesProxyResponse(t *testing.T) {
 	}
 }
 
+func TestRejectsRawGenericIncusWriteMethodsWithoutProxyExecution(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		id      string
+	}{
+		{
+			name:    "post state",
+			id:      "raw-post",
+			message: `{"id":"raw-post","method":"POST","path":"/1.0/instances/web/state","body":{"action":"start"}}`,
+		},
+		{
+			name:    "put profile",
+			id:      "raw-put",
+			message: `{"id":"raw-put","method":"PUT","path":"/1.0/profiles/default","body":{"config":{"raw":"write"}}}`,
+		},
+		{
+			name:    "patch instance",
+			id:      "raw-patch",
+			message: `{"id":"raw-patch","method":"PATCH","path":"/1.0/instances/web","body":{"config":{"limits.cpu":"2"}}}`,
+		},
+		{
+			name:    "delete instance",
+			id:      "raw-delete",
+			message: `{"id":"raw-delete","method":"DELETE","path":"/1.0/instances/web"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientConn, incusCalls := newRequestValidationClient(t)
+			defer clientConn.CloseNow()
+
+			writeWebSocketMessage(t, clientConn, []byte(tt.message))
+			resp := readProxyResponse(t, clientConn)
+
+			if resp.ID != tt.id {
+				t.Fatalf("id = %q, want %s", resp.ID, tt.id)
+			}
+			if resp.Status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.Status)
+			}
+			if resp.Error == "" {
+				t.Fatal("error is empty, want safe validation error")
+			}
+			if strings.Contains(resp.Error, "/1.0/") || strings.Contains(strings.ToLower(resp.Error), "raw") {
+				t.Fatalf("error leaked request detail: %q", resp.Error)
+			}
+			if *incusCalls != 0 {
+				t.Fatalf("incus calls = %d, want 0", *incusCalls)
+			}
+		})
+	}
+}
+
 func TestAgentStateRequestReturnsReportWithoutIncusProxyExecution(t *testing.T) {
 	clientConn, incusCalls := newStateRequestClient(t, "")
 	defer clientConn.CloseNow()
