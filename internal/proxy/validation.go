@@ -52,22 +52,50 @@ func isAllowedIncusReadPath(rawPath string) bool {
 		return false
 	}
 
-	switch parsed.Path {
+	escapedPath := parsed.EscapedPath()
+	switch escapedPath {
 	case "/1.0", "/1.0/instances":
 		return parsed.RawQuery == ""
-	case "/1.0/images", "/1.0/operations":
+	case "/1.0/images":
 		return parsed.RawQuery == "" || isRecursionOneQuery(parsed.Query())
+	case "/1.0/operations":
+		return parsed.RawQuery == ""
 	}
 
-	for _, prefix := range []string{"/1.0/instances/", "/1.0/images/", "/1.0/operations/"} {
-		if strings.HasPrefix(parsed.Path, prefix) && len(parsed.Path) > len(prefix) {
-			return parsed.RawQuery == ""
-		}
+	if parsed.RawQuery != "" {
+		return false
 	}
 
-	return false
+	return hasAllowedDetailReadShape(escapedPath)
 }
 
 func isRecursionOneQuery(values url.Values) bool {
 	return len(values) == 1 && len(values["recursion"]) == 1 && values.Get("recursion") == "1"
+}
+
+func hasAllowedDetailReadShape(escapedPath string) bool {
+	segments := strings.Split(escapedPath, "/")
+	if len(segments) != 4 || segments[0] != "" || segments[1] != "1.0" {
+		return false
+	}
+
+	switch segments[2] {
+	case "instances", "images", "operations":
+	default:
+		return false
+	}
+
+	segment := segments[3]
+	if segment == "" || segment == "." || segment == ".." || strings.Contains(segment, "/") {
+		return false
+	}
+
+	decodedSegment, err := url.PathUnescape(segment)
+	if err != nil {
+		return false
+	}
+	return decodedSegment != "" &&
+		decodedSegment != "." &&
+		decodedSegment != ".." &&
+		!strings.Contains(decodedSegment, "/")
 }
