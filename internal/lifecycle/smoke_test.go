@@ -19,6 +19,7 @@ func TestSmokeLifecycle(t *testing.T) {
 	fake := &smokeIncus{resps: map[string]*incus.ProxyResponse{
 		"/1.0/instances":            syncOK200(),
 		"/1.0/instances/vm-1/state": {Status: http.StatusAccepted, Body: json.RawMessage(`{"type":"async","operation":"/1.0/operations/op-7"}`)},
+		"/1.0/operations/op-7/wait": operationWaitSuccess(),
 		"/1.0/instances/vm-1":       syncOK200(),
 	}}
 	s := NewService(fake)
@@ -32,12 +33,12 @@ func TestSmokeLifecycle(t *testing.T) {
 	c2 := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/vm-1/start", nil)
 	requireOK(t, c2, "start")
 
-	// Stop -> async
+	// Stop -> async operation completed by the agent before returning.
 	c3 := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/vm-1/stop", nil)
 	requireOK(t, c3, "stop")
 	var resp Response
 	json.Unmarshal(c3.Body, &resp)
-	if resp.OperationKind != "async" || resp.OperationID != "op-7" {
+	if resp.OperationKind != "async" || resp.OperationID != "op-7" || resp.Status != "operation-completed" {
 		t.Fatalf("stop normalize = %v", resp)
 	}
 
@@ -77,7 +78,7 @@ func TestSmokeLifecycle(t *testing.T) {
 	// Confirm only allowlisted Incus paths were dispatched.
 	for _, c := range fake.calls {
 		switch c.Path {
-		case "/1.0/instances", "/1.0/instances/vm-1/state", "/1.0/instances/vm-1":
+		case "/1.0/instances", "/1.0/instances/vm-1/state", "/1.0/operations/op-7/wait", "/1.0/instances/vm-1":
 		default:
 			t.Fatalf("disallowed Incus path dispatched: %q", c.Path)
 		}

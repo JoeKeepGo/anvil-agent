@@ -111,11 +111,14 @@ func TestLifecycleCreateHappyPath(t *testing.T) {
 	if resp.Status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.Status)
 	}
-	if len(fake.calls) != 1 {
-		t.Fatalf("incus calls = %d, want 1", len(fake.calls))
+	if len(fake.calls) != 2 {
+		t.Fatalf("incus calls = %d, want 2", len(fake.calls))
 	}
 	if fake.calls[0].Path != "/1.0/instances" {
 		t.Fatalf("path = %q", fake.calls[0].Path)
+	}
+	if fake.calls[1].Method != http.MethodGet || fake.calls[1].Path != "/1.0/instances/vm-1" {
+		t.Fatalf("verify call = %s %s, want GET /1.0/instances/vm-1", fake.calls[1].Method, fake.calls[1].Path)
 	}
 	if !strings.Contains(string(fake.calls[0].Body), `"virtual-machine"`) {
 		t.Fatalf("body not allowlisted: %s", fake.calls[0].Body)
@@ -254,9 +257,12 @@ func TestLifecycleAuthPreserved(t *testing.T) {
 }
 
 func TestLifecycleResponseNoLeak(t *testing.T) {
-	fake := &fakeLifecycleIncus{resp: &incus.ProxyResponse{
-		Status: http.StatusAccepted,
-		Body:   json.RawMessage(`{"operation":"/1.0/operations/op-1","metadata":{"user_data":"MUST-NOT-LEAK"}}`),
+	fake := &fakeLifecycleIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/instances/vm-1/state": {
+			Status: http.StatusAccepted,
+			Body:   json.RawMessage(`{"operation":"/1.0/operations/op-1","metadata":{"user_data":"MUST-NOT-LEAK"}}`),
+		},
+		"/1.0/operations/op-1/wait": lifecycleOperationWaitSuccess(),
 	}}
 	conn, _ := dialLifecycle(t, "", fake)
 	defer conn.CloseNow()
@@ -282,13 +288,26 @@ func TestLifecycleUnusedImportGuard(t *testing.T) {
 
 // --- fakes ------------------------------------------------------------------
 
+func lifecycleOperationWaitSuccess() *incus.ProxyResponse {
+	return &incus.ProxyResponse{
+		Status: http.StatusOK,
+		Body:   json.RawMessage(`{"type":"sync","metadata":{"status":"Success","status_code":200}}`),
+	}
+}
+
 type fakeLifecycleIncus struct {
 	calls []*incus.ProxyRequest
 	resp  *incus.ProxyResponse
+	resps map[string]*incus.ProxyResponse
 }
 
 func (f *fakeLifecycleIncus) Execute(ctx context.Context, req *incus.ProxyRequest) *incus.ProxyResponse {
 	f.calls = append(f.calls, req)
+	if f.resps != nil {
+		if r, ok := f.resps[req.Path]; ok {
+			return r
+		}
+	}
 	if f.resp != nil {
 		return f.resp
 	}

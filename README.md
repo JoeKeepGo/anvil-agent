@@ -125,7 +125,7 @@ POST /agent/v1/lifecycle/instances/{name}/restart
 POST /agent/v1/lifecycle/instances/{name}/delete
 ```
 
-Instance names must match a DNS-label-safe allowlist and are URL-encoded into the Incus path. Create requests mirror the M13 backend VM lifecycle policy contract (`cpuCount`/`memoryBytes`/`rootDiskBytes`), fix the Incus instance type to `virtual-machine`, and emit bounded, validated limits only. Delete requires an explicit `confirm` field. Unknown JSON fields, path traversal, shell metacharacters, disallowed operation segments (e.g. `snapshot`/`exec`/`console`/`files`/`migrate`), and oversized payloads are rejected with agent-owned safe error codes. Async Incus operations are normalized to an `operationId` + `operationKind: "async"` echo with no raw Incus bytes.
+Instance names must match a DNS-label-safe allowlist and are URL-encoded into the Incus path. Create requests mirror the M13 backend VM lifecycle policy contract (`cpuCount`/`memoryBytes`/`rootDiskBytes`), fix the Incus instance type to `virtual-machine`, and emit bounded, validated limits only. Delete requires an explicit `confirm` field. Unknown JSON fields, path traversal, shell metacharacters, disallowed operation segments (e.g. `snapshot`/`exec`/`console`/`files`/`migrate`), and oversized payloads are rejected with agent-owned safe error codes. Async Incus operations are waited through the typed lifecycle service before success is returned; completed async responses include `status: "operation-completed"`, the Incus operation id, and `operationKind: "async"` with no raw Incus bytes.
 
 ## Security Model
 

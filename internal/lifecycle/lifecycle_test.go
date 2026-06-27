@@ -42,6 +42,36 @@ func asyncOK(opID string) *incus.ProxyResponse {
 	}
 }
 
+func operationWait(statusCode int, status string, errMessage string) *incus.ProxyResponse {
+	metadata := map[string]interface{}{
+		"id":          "op-1",
+		"status":      status,
+		"status_code": statusCode,
+	}
+	if errMessage != "" {
+		metadata["err"] = errMessage
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"type":     "sync",
+		"metadata": metadata,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return &incus.ProxyResponse{
+		Status: http.StatusOK,
+		Body:   raw,
+	}
+}
+
+func operationWaitSuccess() *incus.ProxyResponse {
+	return operationWait(200, "Success", "")
+}
+
+func operationWaitFailure(message string) *incus.ProxyResponse {
+	return operationWait(400, "Failure", message)
+}
+
 func mustJSON(t *testing.T, v interface{}) json.RawMessage {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -187,8 +217,8 @@ func TestCreateConstructsAllowlistedIncusRequest(t *testing.T) {
 	if r.Err != nil {
 		t.Fatalf("create failed: %v", r.Err)
 	}
-	if len(fb.calls) != 1 {
-		t.Fatalf("incus calls = %d, want 1", len(fb.calls))
+	if len(fb.calls) != 2 {
+		t.Fatalf("incus calls = %d, want 2", len(fb.calls))
 	}
 	call := fb.calls[0]
 	if call.Method != http.MethodPost {
@@ -196,6 +226,9 @@ func TestCreateConstructsAllowlistedIncusRequest(t *testing.T) {
 	}
 	if call.Path != "/1.0/instances" {
 		t.Fatalf("path = %q, want /1.0/instances", call.Path)
+	}
+	if fb.calls[1].Method != http.MethodGet || fb.calls[1].Path != "/1.0/instances/vm-1" {
+		t.Fatalf("verify call = %s %s, want GET /1.0/instances/vm-1", fb.calls[1].Method, fb.calls[1].Path)
 	}
 	var sent map[string]interface{}
 	if err := json.Unmarshal(call.Body, &sent); err != nil {
@@ -319,26 +352,85 @@ func TestNormalizeSyncResponse(t *testing.T) {
 	}
 }
 
-func TestNormalizeAsyncResponse(t *testing.T) {
-	fb := &fakeIncus{resp: asyncOK("abc-123")}
+func TestAsyncCreateWaitsForOperationCompletionBeforeReturningSuccess(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/instances":               asyncOK("abc-123"),
+		"/1.0/operations/abc-123/wait": operationWaitSuccess(),
+		"/1.0/instances/vm-1":          syncOK(),
+	}}
 	s := NewService(fb)
-	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/vm-1/stop", mustJSON(t, StateRequest{}))
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
 	if r.Err != nil {
-		t.Fatalf("stop failed: %v", r.Err)
+		t.Fatalf("create failed: %v", r.Err)
 	}
-	if r.Status != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", r.Status)
+	if r.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", r.Status)
 	}
 	var resp Response
 	json.Unmarshal(r.Body, &resp)
-	if resp.OperationKind != "async" {
-		t.Fatalf("kind = %q, want async", resp.OperationKind)
+	if resp.OperationKind != "async" || resp.OperationID != "abc-123" {
+		t.Fatalf("operation = %q/%q, want async/abc-123", resp.OperationKind, resp.OperationID)
 	}
-	if resp.OperationID != "abc-123" {
-		t.Fatalf("op id = %q, want abc-123", resp.OperationID)
+	if resp.Status != "operation-completed" {
+		t.Fatalf("status = %q, want operation-completed", resp.Status)
 	}
-	if resp.Status != "operation-accepted" {
-		t.Fatalf("status = %q, want operation-accepted", resp.Status)
+	if len(fb.calls) != 3 {
+		t.Fatalf("calls = %d, want create + wait + instance verify", len(fb.calls))
+	}
+}
+
+func TestAsyncCreateFailsWhenOperationDisappears(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/instances":                  asyncOK("missing-op"),
+		"/1.0/operations/missing-op/wait": {Status: http.StatusNotFound},
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_OPERATION_MISSING" {
+		t.Fatalf("err = %v, want INCUS_OPERATION_MISSING", r.Err)
+	}
+	if r.Err.Status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", r.Err.Status)
+	}
+}
+
+func TestAsyncCreateFailsWhenOperationFails(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/instances":                 asyncOK("failed-op"),
+		"/1.0/operations/failed-op/wait": operationWaitFailure("boom"),
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_OPERATION_FAILED" {
+		t.Fatalf("err = %v, want INCUS_OPERATION_FAILED", r.Err)
+	}
+	raw := r.Err.Error()
+	if strings.Contains(raw, "boom") {
+		t.Fatalf("operation failure leaked raw Incus error: %q", raw)
+	}
+}
+
+func TestAsyncCreateFailsWhenCompletedInstanceIsMissing(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/instances":                    asyncOK("completed-op"),
+		"/1.0/operations/completed-op/wait": operationWaitSuccess(),
+		"/1.0/instances/vm-1":               {Status: http.StatusNotFound},
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_INSTANCE_MISSING" {
+		t.Fatalf("err = %v, want INCUS_INSTANCE_MISSING", r.Err)
+	}
+	if r.Err.Status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", r.Err.Status)
 	}
 }
 
@@ -355,6 +447,27 @@ func TestNormalizeMalformedResponseIsSafeError(t *testing.T) {
 	raw := string(r.Body)
 	if strings.Contains(raw, "not json") {
 		t.Fatalf("response leaked malformed upstream body: %s", raw)
+	}
+}
+
+func TestAcceptedResponseWithoutOperationIsSafeError(t *testing.T) {
+	fb := &fakeIncus{resp: &incus.ProxyResponse{Status: http.StatusAccepted, Body: json.RawMessage(`{"type":"async"}`)}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/vm-1/start", nil)
+	if r.Err == nil || r.Err.Code != "INCUS_OPERATION_MALFORMED" {
+		t.Fatalf("err = %v, want INCUS_OPERATION_MALFORMED", r.Err)
+	}
+	if r.Err.Status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", r.Err.Status)
+	}
+}
+
+func TestAcceptedResponseWithMalformedBodyIsSafeError(t *testing.T) {
+	fb := &fakeIncus{resp: &incus.ProxyResponse{Status: http.StatusAccepted, Body: json.RawMessage(`{not json`)}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/vm-1/start", nil)
+	if r.Err == nil || r.Err.Code != "INCUS_OPERATION_MALFORMED" {
+		t.Fatalf("err = %v, want INCUS_OPERATION_MALFORMED", r.Err)
 	}
 }
 
@@ -398,9 +511,12 @@ func TestBuildInsertsEncInstanceNameInPath(t *testing.T) {
 // --- No-leak sweep ----------------------------------------------------------
 
 func TestNoResponseLeaksRawIncusOrPath(t *testing.T) {
-	fb := &fakeIncus{resp: &incus.ProxyResponse{
-		Status: http.StatusAccepted,
-		Body:   json.RawMessage(`{"type":"async","operation":"/1.0/operations/op-1","metadata":{"secret":"MUST-NOT-LEAK","config":{"user.shell":"/bin/bash"},"socket":"/var/lib/incus/unix.socket"}}`),
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/instances/vm-1/state": {
+			Status: http.StatusAccepted,
+			Body:   json.RawMessage(`{"type":"async","operation":"/1.0/operations/op-1","metadata":{"secret":"MUST-NOT-LEAK","config":{"user.shell":"/bin/bash"},"socket":"/var/lib/incus/unix.socket"}}`),
+		},
+		"/1.0/operations/op-1/wait": operationWaitSuccess(),
 	}}
 	s := NewService(fb)
 	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/vm-1/start", nil)
