@@ -90,7 +90,7 @@ type CapabilitiesResponse struct {
 type Response struct {
 	Action        Action `json:"action"`
 	Instance      string `json:"instance"`
-	Status        string `json:"status"`        // agent-owned: "operation-accepted" | "sync-ok"
+	Status        string `json:"status"`        // agent-owned: "operation-completed" | "sync-ok"
 	OperationID   string `json:"operationId"`   // normalized; empty for sync
 	OperationKind string `json:"operationKind"` // "async" | "sync"
 	ErrorCode     string `json:"errorCode,omitempty"`
@@ -237,14 +237,14 @@ func (s *Service) execute(ctx context.Context, action Action, name string, req *
 	if resp == nil {
 		return Result{Err: newErr(http.StatusServiceUnavailable, "INCUS_UNAVAILABLE", "incus lifecycle backend unavailable")}
 	}
-	return normalizeResponse(action, name, resp)
+	return s.normalizeResponse(ctx, action, name, resp)
 }
 
 // normalizeResponse converts an Incus ProxyResponse into the agent-owned
 // lifecycle Response. It never echoes the raw Incus body, socket path, token,
-// or product state. Malformed upstream JSON is treated as a safe error and no
-// raw bytes are returned.
-func normalizeResponse(action Action, instance string, resp *incus.ProxyResponse) Result {
+// or product state. Async Incus operations are waited before success is
+// returned so operation acceptance is never treated as lifecycle completion.
+func (s *Service) normalizeResponse(ctx context.Context, action Action, instance string, resp *incus.ProxyResponse) Result {
 	if resp.Status < 200 || resp.Status >= 300 {
 		return Result{Err: newErr(resp.Status, mapIncusErrorCode(resp.Status), mapIncusErrorMessage(resp.Status))}
 	}
@@ -262,32 +262,111 @@ func normalizeResponse(action Action, instance string, resp *incus.ProxyResponse
 			operationID = normalizeOperationID(env.Operation)
 		}
 	}
+	if resp.Status == http.StatusAccepted && operationKind != "async" {
+		return Result{Err: newErr(http.StatusBadGateway, "INCUS_OPERATION_MALFORMED", "incus lifecycle operation reference is malformed")}
+	}
 
-	status := "sync-ok"
 	if operationKind == "async" {
-		status = "operation-accepted"
+		if operationID == "" {
+			return Result{Err: newErr(http.StatusBadGateway, "INCUS_OPERATION_MALFORMED", "incus lifecycle operation reference is malformed")}
+		}
+		waited := s.waitForOperation(ctx, operationID)
+		if waited.Err != nil {
+			return waited
+		}
+	}
+	if action == ActionCreate {
+		verified := s.verifyCreatedInstance(ctx, instance)
+		if verified.Err != nil {
+			return verified
+		}
 	}
 
 	body, err := json.Marshal(Response{
 		Action:        action,
 		Instance:      instance,
-		Status:        status,
+		Status:        lifecycleSuccessStatus(operationKind),
 		OperationID:   operationID,
 		OperationKind: operationKind,
 	})
 	if err != nil {
 		return Result{Err: newErr(http.StatusInternalServerError, "NORMALIZE_FAILED", "normalize lifecycle response")}
 	}
-	return Result{Status: resp.Status, Body: body}
+	return Result{Status: http.StatusOK, Body: body}
+}
+
+func lifecycleSuccessStatus(operationKind string) string {
+	if operationKind == "async" {
+		return "operation-completed"
+	}
+	return "sync-ok"
+}
+
+func (s *Service) waitForOperation(ctx context.Context, operationID string) Result {
+	if err := ctx.Err(); err != nil {
+		return Result{Err: newErr(http.StatusServiceUnavailable, "REQUEST_CANCELLED", "request cancelled")}
+	}
+	resp := s.incus.Execute(ctx, &incus.ProxyRequest{
+		Method: http.MethodGet,
+		Path:   "/1.0/operations/" + url.PathEscape(operationID) + "/wait",
+	})
+	if resp == nil {
+		return Result{Err: newErr(http.StatusServiceUnavailable, "INCUS_UNAVAILABLE", "incus lifecycle backend unavailable")}
+	}
+	if resp.Status == http.StatusNotFound {
+		return Result{Err: newErr(http.StatusBadGateway, "INCUS_OPERATION_MISSING", "incus lifecycle operation disappeared before completion")}
+	}
+	if resp.Status < 200 || resp.Status >= 300 {
+		return Result{Err: newErr(resp.Status, mapIncusErrorCode(resp.Status), mapIncusErrorMessage(resp.Status))}
+	}
+	var env incusEnvelope
+	if len(resp.Body) == 0 || json.Unmarshal(resp.Body, &env) != nil {
+		return Result{Err: newErr(http.StatusBadGateway, "INCUS_OPERATION_MALFORMED", "incus lifecycle operation response is malformed")}
+	}
+	if env.Metadata.StatusCode >= 200 && env.Metadata.StatusCode < 300 {
+		return Result{}
+	}
+	if env.Metadata.StatusCode == 0 {
+		return Result{Err: newErr(http.StatusBadGateway, "INCUS_OPERATION_MALFORMED", "incus lifecycle operation response is malformed")}
+	}
+	return Result{Err: newErr(http.StatusBadGateway, "INCUS_OPERATION_FAILED", "incus lifecycle operation failed")}
+}
+
+func (s *Service) verifyCreatedInstance(ctx context.Context, instance string) Result {
+	if err := ctx.Err(); err != nil {
+		return Result{Err: newErr(http.StatusServiceUnavailable, "REQUEST_CANCELLED", "request cancelled")}
+	}
+	if err := ValidateInstanceName(instance); err != nil {
+		return Result{Err: err}
+	}
+	resp := s.incus.Execute(ctx, &incus.ProxyRequest{
+		Method: http.MethodGet,
+		Path:   "/1.0/instances/" + url.PathEscape(instance),
+	})
+	if resp == nil {
+		return Result{Err: newErr(http.StatusServiceUnavailable, "INCUS_UNAVAILABLE", "incus lifecycle backend unavailable")}
+	}
+	if resp.Status == http.StatusNotFound {
+		return Result{Err: newErr(http.StatusBadGateway, "INCUS_INSTANCE_MISSING", "incus lifecycle create completed but instance is missing")}
+	}
+	if resp.Status < 200 || resp.Status >= 300 {
+		return Result{Err: newErr(resp.Status, mapIncusErrorCode(resp.Status), mapIncusErrorMessage(resp.Status))}
+	}
+	return Result{}
 }
 
 // incusEnvelope holds only the documented Incus REST envelope fields the
-// lifecycle protocol reads to normalize operation references. Other fields
-// (metadata, status, status_code) are intentionally ignored so no upstream
+// lifecycle protocol reads to normalize operation references and terminal
+// operation status. Other fields are intentionally ignored so no upstream
 // guessing or leakage occurs.
 type incusEnvelope struct {
 	Type      string `json:"type"`
 	Operation string `json:"operation"`
+	Metadata  struct {
+		StatusCode int    `json:"status_code"`
+		Status     string `json:"status"`
+		Err        string `json:"err"`
+	} `json:"metadata"`
 }
 
 // normalizeOperationID extracts the trailing path segment of an Incus
