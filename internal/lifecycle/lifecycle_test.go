@@ -234,7 +234,7 @@ func TestCreateConstructsAllowlistedIncusRequest(t *testing.T) {
 		"/1.0/profiles/default": defaultProfileRoot(),
 	}}
 	s := NewService(fb)
-	body := mustJSON(t, CreateInstanceRequest{Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 2, MemoryBytes: 1 << 30, RootDiskBytes: 1 << 32})
+	body := mustJSON(t, CreateInstanceRequest{Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 2, MemoryBytes: 1 << 30, RootDiskBytes: 1 << 32, SecureBootEnabled: false})
 	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", body)
 	if r.Err != nil {
 		t.Fatalf("create failed: %v", r.Err)
@@ -282,9 +282,87 @@ func TestCreateConstructsAllowlistedIncusRequest(t *testing.T) {
 	if root["size"] != "4294967296" {
 		t.Fatalf("root.size = %v, want 4294967296", root["size"])
 	}
+	cfg, ok := sent["config"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("config = %#v, want object", sent["config"])
+	}
+	if cfg["security.secureboot"] != "false" {
+		t.Fatalf("config.security.secureboot = %v, want \"false\" for SecureBootEnabled:false", cfg["security.secureboot"])
+	}
 	raw := string(call.Body)
 	if strings.Contains(raw, "shellCommand") || strings.Contains(raw, "hookCommand") {
 		t.Fatalf("sent body leaked forbidden field: %s", raw)
+	}
+}
+
+func TestCreateWithSecureBootEnabledSetsTrue(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": defaultProfileRoot(),
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024, SecureBootEnabled: true,
+	}))
+	if r.Err != nil {
+		t.Fatalf("create failed: %v", r.Err)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal(fb.calls[1].Body, &sent); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	cfg := sent["config"].(map[string]interface{})
+	if cfg["security.secureboot"] != "true" {
+		t.Fatalf("config.security.secureboot = %v, want \"true\" for SecureBootEnabled:true", cfg["security.secureboot"])
+	}
+}
+
+func TestCreateWithSecureBootAbsentDefaultsFalse(t *testing.T) {
+	// When backend does not send secureBootEnabled (absent = zero value false),
+	// agent must emit security.secureboot=false. This covers the backward-compat
+	// path where old backend omits the field.
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": defaultProfileRoot(),
+	}}
+	s := NewService(fb)
+	// JSON payload without secureBootEnabled field — zero value applies.
+	body := json.RawMessage(`{"name":"vm-1","image":"ubuntu/24.04","cpuCount":1,"memoryBytes":1024,"rootDiskBytes":1024}`)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", body)
+	if r.Err != nil {
+		t.Fatalf("create failed: %v", r.Err)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal(fb.calls[1].Body, &sent); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	cfg := sent["config"].(map[string]interface{})
+	if cfg["security.secureboot"] != "false" {
+		t.Fatalf("config.security.secureboot = %v, want \"false\" when secureBootEnabled absent", cfg["security.secureboot"])
+	}
+}
+
+func TestCreateRejectsArbitrarySecurityConfig(t *testing.T) {
+	// Verify the agent never passes arbitrary security.* config to Incus.
+	// The only security.* key in the create payload must be security.secureboot,
+	// derived solely from the backend-controlled SecureBootEnabled field.
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": defaultProfileRoot(),
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err != nil {
+		t.Fatalf("create failed: %v", r.Err)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal(fb.calls[1].Body, &sent); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	cfg := sent["config"].(map[string]interface{})
+	for key := range cfg {
+		if strings.HasPrefix(key, "security.") && key != "security.secureboot" {
+			t.Fatalf("unexpected security.* key in Incus create config: %q", key)
+		}
 	}
 }
 
