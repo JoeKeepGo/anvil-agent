@@ -58,12 +58,20 @@ const (
 // CreateInstanceRequest is the body of POST
 // /agent/v1/lifecycle/instances/create. Field names mirror the M13 Phase 2
 // backend VM lifecycle policy contract (cpuCount/memoryBytes/rootDiskBytes).
+//
+// SecureBootEnabled is a backend-controlled field. The backend resolves
+// whether the requested image supports Secure Boot and sends the decision
+// here; the agent translates it to the Incus security.secureboot config key.
+// Zero value false is the safe default for M13 Alpine/disk-kvm.img images
+// that do not support Secure Boot. When Secure Boot capable images are added
+// in future milestones, the backend must explicitly send true.
 type CreateInstanceRequest struct {
-	Name          string `json:"name"`
-	Image         string `json:"image"`
-	CPUCount      int    `json:"cpuCount"`
-	MemoryBytes   int64  `json:"memoryBytes"`
-	RootDiskBytes int64  `json:"rootDiskBytes"`
+	Name              string `json:"name"`
+	Image             string `json:"image"`
+	CPUCount          int    `json:"cpuCount"`
+	MemoryBytes       int64  `json:"memoryBytes"`
+	RootDiskBytes     int64  `json:"rootDiskBytes"`
+	SecureBootEnabled bool   `json:"secureBootEnabled"`
 }
 
 // StateRequest is the optional body for start/stop/restart. All fields are

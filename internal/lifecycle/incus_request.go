@@ -23,6 +23,8 @@ type incusInstanceState struct {
 // fields. No config keys, devices, profiles, cloud-init, or user data are
 // accepted from the request; the root disk device is copied from the default
 // profile by the service and only its size is overridden.
+// security.secureboot is derived from the backend-controlled SecureBootEnabled
+// field; the agent never accepts arbitrary security.* config from callers.
 type incusInstanceCreate struct {
 	Name    string                       `json:"name"`
 	Type    string                       `json:"type"`
@@ -80,8 +82,9 @@ func buildCreate(encodedName string, payload interface{}) (*incus.ProxyRequest, 
 		Type:   "virtual-machine",
 		Source: incusImageSource{Type: "image", Alias: req.Image},
 		Config: map[string]string{
-			"limits.cpu":    fmt.Sprintf("%d", req.CPUCount),
-			"limits.memory": formatSize(req.MemoryBytes),
+			"limits.cpu":          fmt.Sprintf("%d", req.CPUCount),
+			"limits.memory":       formatSize(req.MemoryBytes),
+			"security.secureboot": formatSecureBoot(req.SecureBootEnabled),
 		},
 		Devices: map[string]map[string]string{
 			create.RootDisk.Name: create.RootDisk.deviceWithSize(formatSize(req.RootDiskBytes)),
@@ -124,4 +127,15 @@ func buildDelete(encodedName string) *incus.ProxyRequest {
 		Method: http.MethodDelete,
 		Path:   "/1.0/instances/" + encodedName,
 	}
+}
+
+// formatSecureBoot converts the backend-controlled SecureBootEnabled decision
+// to the Incus security.secureboot config string. The value comes from the
+// backend policy (resolveVmSecureBootEnabled); the agent never derives it
+// autonomously or accepts arbitrary security.* config from callers.
+func formatSecureBoot(enabled bool) string {
+	if enabled {
+		return "true"
+	}
+	return "false"
 }
