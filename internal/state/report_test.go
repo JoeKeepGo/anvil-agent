@@ -220,6 +220,15 @@ func (f fakeWireGuardDetector) WireGuardAvailable(ctx context.Context) (bool, er
 	return f.available, f.err
 }
 
+type fakeVMLifecycleDetector struct {
+	available bool
+	err       error
+}
+
+func (f fakeVMLifecycleDetector) VMLifecycleAvailable(ctx context.Context) (bool, error) {
+	return f.available, f.err
+}
+
 func TestReporterReflectsWireGuardCapabilityFromDetector(t *testing.T) {
 	now := time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC)
 	reporter := NewReporter(ReporterOptions{
@@ -264,5 +273,53 @@ func TestReporterDefaultsWireGuardCapabilityWhenDetectorAbsent(t *testing.T) {
 	}
 	if report.Capabilities.WireGuard {
 		t.Fatal("wireGuard capability = true, want false when detector absent")
+	}
+}
+
+func TestReporterReflectsVMLifecycleCapabilityFromDetector(t *testing.T) {
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	reporter := NewReporter(ReporterOptions{
+		Identity: AgentIdentity{
+			ID:                 "11111111-1111-4111-8111-111111111111",
+			CreatedAt:          now,
+			StateSchemaVersion: 1,
+		},
+		Version:   "test",
+		StartedAt: now,
+		Hostname:  func() (string, error) { return "anvil-local-vm", nil },
+		Now:       func() time.Time { return now },
+		VMLife:    fakeVMLifecycleDetector{available: true},
+	})
+
+	report, err := reporter.Report(context.Background())
+	if err != nil {
+		t.Fatalf("Report error: %v", err)
+	}
+	if !report.Capabilities.VMLifecycle {
+		t.Fatal("vmLifecycle capability = false, want true from detector")
+	}
+}
+
+func TestReporterReflectsVMLifecycleUnavailableFromDetector(t *testing.T) {
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	reporter := NewReporter(ReporterOptions{
+		Identity: AgentIdentity{
+			ID:                 "11111111-1111-4111-8111-111111111111",
+			CreatedAt:          now,
+			StateSchemaVersion: 1,
+		},
+		Version:   "test",
+		StartedAt: now,
+		Hostname:  func() (string, error) { return "anvil-local-vm", nil },
+		Now:       func() time.Time { return now },
+		VMLife:    fakeVMLifecycleDetector{available: false},
+	})
+
+	report, err := reporter.Report(context.Background())
+	if err != nil {
+		t.Fatalf("Report error: %v", err)
+	}
+	if report.Capabilities.VMLifecycle {
+		t.Fatal("vmLifecycle capability = true, want false from detector")
 	}
 }

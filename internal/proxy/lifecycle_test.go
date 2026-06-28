@@ -101,7 +101,9 @@ func TestLifecycleUnknownPathReturns404(t *testing.T) {
 }
 
 func TestLifecycleCreateHappyPath(t *testing.T) {
-	fake := &fakeLifecycleIncus{}
+	fake := &fakeLifecycleIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": lifecycleDefaultProfileRoot(),
+	}}
 	conn, _ := dialLifecycle(t, "", fake)
 	defer conn.CloseNow()
 
@@ -111,17 +113,35 @@ func TestLifecycleCreateHappyPath(t *testing.T) {
 	if resp.Status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.Status)
 	}
-	if len(fake.calls) != 2 {
-		t.Fatalf("incus calls = %d, want 2", len(fake.calls))
+	if len(fake.calls) != 3 {
+		t.Fatalf("incus calls = %d, want profile + create + verify", len(fake.calls))
 	}
-	if fake.calls[0].Path != "/1.0/instances" {
-		t.Fatalf("path = %q", fake.calls[0].Path)
+	if fake.calls[0].Method != http.MethodGet || fake.calls[0].Path != "/1.0/profiles/default" {
+		t.Fatalf("profile call = %s %s, want GET /1.0/profiles/default", fake.calls[0].Method, fake.calls[0].Path)
 	}
-	if fake.calls[1].Method != http.MethodGet || fake.calls[1].Path != "/1.0/instances/vm-1" {
-		t.Fatalf("verify call = %s %s, want GET /1.0/instances/vm-1", fake.calls[1].Method, fake.calls[1].Path)
+	if fake.calls[1].Path != "/1.0/instances" {
+		t.Fatalf("path = %q", fake.calls[1].Path)
 	}
-	if !strings.Contains(string(fake.calls[0].Body), `"virtual-machine"`) {
-		t.Fatalf("body not allowlisted: %s", fake.calls[0].Body)
+	if fake.calls[2].Method != http.MethodGet || fake.calls[2].Path != "/1.0/instances/vm-1" {
+		t.Fatalf("verify call = %s %s, want GET /1.0/instances/vm-1", fake.calls[2].Method, fake.calls[2].Path)
+	}
+	if !strings.Contains(string(fake.calls[1].Body), `"virtual-machine"`) {
+		t.Fatalf("body not allowlisted: %s", fake.calls[1].Body)
+	}
+	var createBody map[string]interface{}
+	if err := json.Unmarshal(fake.calls[1].Body, &createBody); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	devices, ok := createBody["devices"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("devices = %#v, want object", createBody["devices"])
+	}
+	root, ok := devices["root"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("root device = %#v, want object", devices["root"])
+	}
+	if root["type"] != "disk" || root["path"] != "/" || root["pool"] != "default" || root["size"] != "1024" {
+		t.Fatalf("root device = %#v, want disk path / pool default / size 1024", root)
 	}
 }
 
@@ -292,6 +312,13 @@ func lifecycleOperationWaitSuccess() *incus.ProxyResponse {
 	return &incus.ProxyResponse{
 		Status: http.StatusOK,
 		Body:   json.RawMessage(`{"type":"sync","metadata":{"status":"Success","status_code":200}}`),
+	}
+}
+
+func lifecycleDefaultProfileRoot() *incus.ProxyResponse {
+	return &incus.ProxyResponse{
+		Status: http.StatusOK,
+		Body:   json.RawMessage(`{"type":"sync","metadata":{"name":"default","devices":{"root":{"type":"disk","path":"/","pool":"default"}}}}`),
 	}
 }
 

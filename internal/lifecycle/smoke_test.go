@@ -17,6 +17,7 @@ func TestSmokeLifecycle(t *testing.T) {
 	// Fake Incus that returns an async operation for stop and sync-ok for the
 	// rest, and asserts every dispatched request is an allowlisted path.
 	fake := &smokeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default":     syncDefaultProfileRoot(),
 		"/1.0/instances":            syncOK200(),
 		"/1.0/instances/vm-1/state": {Status: http.StatusAccepted, Body: json.RawMessage(`{"type":"async","operation":"/1.0/operations/op-7"}`)},
 		"/1.0/operations/op-7/wait": operationWaitSuccess(),
@@ -78,7 +79,7 @@ func TestSmokeLifecycle(t *testing.T) {
 	// Confirm only allowlisted Incus paths were dispatched.
 	for _, c := range fake.calls {
 		switch c.Path {
-		case "/1.0/instances", "/1.0/instances/vm-1/state", "/1.0/operations/op-7/wait", "/1.0/instances/vm-1":
+		case "/1.0/profiles/default", "/1.0/instances", "/1.0/instances/vm-1/state", "/1.0/operations/op-7/wait", "/1.0/instances/vm-1":
 		default:
 			t.Fatalf("disallowed Incus path dispatched: %q", c.Path)
 		}
@@ -103,6 +104,13 @@ func requireOK(t *testing.T, r Result, label string) {
 
 func syncOK200() *incus.ProxyResponse {
 	return &incus.ProxyResponse{Status: http.StatusOK, Body: json.RawMessage(`{"type":"sync"}`)}
+}
+
+func syncDefaultProfileRoot() *incus.ProxyResponse {
+	return &incus.ProxyResponse{
+		Status: http.StatusOK,
+		Body:   json.RawMessage(`{"type":"sync","metadata":{"name":"default","devices":{"root":{"type":"disk","path":"/","pool":"default"}}}}`),
+	}
 }
 
 type smokeIncus struct {

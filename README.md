@@ -112,7 +112,7 @@ Interface names must match the Anvil-managed prefix (`anvilwg` by default); requ
 
 ## VM Lifecycle Protocol
 
-The agent exposes a narrow, trusted backend-to-agent VM lifecycle protocol. It dispatches only the allowlisted Incus instance operations `create`, `start`, `stop`, `restart`, and `delete`, and never exposes arbitrary Incus write paths, shell execution, snapshots, migration, console, or file operations. The agent owns lifecycle response normalization and never echoes raw Incus output, the Incus Unix socket path, tokens, host private config, or product state.
+The agent exposes a narrow, trusted backend-to-agent VM lifecycle protocol. It dispatches only the allowlisted Incus instance operations `create`, `start`, `stop`, `restart`, and `delete`, and never exposes arbitrary Incus write paths, shell execution, snapshots, migration, console, or file operations. The agent owns lifecycle response normalization and never echoes raw Incus output, the Incus Unix socket path, tokens, host private config, or product state. The `vmLifecycle` state capability is reported only when the lifecycle protocol is wired and the host can actually support Incus virtual-machine creation, including `/dev/kvm` availability and a safe default profile root disk.
 
 Endpoint shape (trusted WS messages, not browser-public):
 
@@ -125,7 +125,7 @@ POST /agent/v1/lifecycle/instances/{name}/restart
 POST /agent/v1/lifecycle/instances/{name}/delete
 ```
 
-Instance names must match a DNS-label-safe allowlist and are URL-encoded into the Incus path. Create requests mirror the M13 backend VM lifecycle policy contract (`cpuCount`/`memoryBytes`/`rootDiskBytes`), fix the Incus instance type to `virtual-machine`, and emit bounded, validated limits only. Delete requires an explicit `confirm` field. Unknown JSON fields, path traversal, shell metacharacters, disallowed operation segments (e.g. `snapshot`/`exec`/`console`/`files`/`migrate`), and oversized payloads are rejected with agent-owned safe error codes. Async Incus operations are waited through the typed lifecycle service before success is returned; completed async responses include `status: "operation-completed"`, the Incus operation id, and `operationKind: "async"` with no raw Incus bytes.
+Instance names must match a DNS-label-safe allowlist and are URL-encoded into the Incus path. Create requests mirror the M13 backend VM lifecycle policy contract (`cpuCount`/`memoryBytes`/`rootDiskBytes`), fix the Incus instance type to `virtual-machine`, and emit bounded, validated limits only. The agent reads the default Incus profile internally, requires exactly one root disk device with a storage pool, copies that root disk's `path`/`pool`/safe profile fields, and only overrides its `size`; unsafe or malformed profile state fails before a create request reaches Incus. Delete requires an explicit `confirm` field. Unknown JSON fields, path traversal, shell metacharacters, disallowed operation segments (e.g. `snapshot`/`exec`/`console`/`files`/`migrate`), and oversized payloads are rejected with agent-owned safe error codes. Async Incus operations are waited through the typed lifecycle service before success is returned; completed async responses include `status: "operation-completed"`, the Incus operation id, and `operationKind: "async"` with no raw Incus bytes.
 
 ## Security Model
 
