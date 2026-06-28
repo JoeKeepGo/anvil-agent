@@ -237,6 +237,23 @@ func TestCreateConstructsAllowlistedIncusRequest(t *testing.T) {
 	if sent["type"].(string) != "virtual-machine" {
 		t.Fatalf("type = %v, want virtual-machine", sent["type"])
 	}
+	devices, ok := sent["devices"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("devices = %#v, want object", sent["devices"])
+	}
+	root, ok := devices["root"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("root device = %#v, want object", devices["root"])
+	}
+	if root["type"] != "disk" {
+		t.Fatalf("root.type = %v, want disk", root["type"])
+	}
+	if root["path"] != "/" {
+		t.Fatalf("root.path = %v, want / so Incus recognizes a root disk", root["path"])
+	}
+	if root["size"] != "4294967296" {
+		t.Fatalf("root.size = %v, want 4294967296", root["size"])
+	}
 	raw := string(call.Body)
 	if strings.Contains(raw, "shellCommand") || strings.Contains(raw, "hookCommand") {
 		t.Fatalf("sent body leaked forbidden field: %s", raw)
@@ -401,7 +418,7 @@ func TestAsyncCreateFailsWhenOperationDisappears(t *testing.T) {
 func TestAsyncCreateFailsWhenOperationFails(t *testing.T) {
 	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
 		"/1.0/instances":                 asyncOK("failed-op"),
-		"/1.0/operations/failed-op/wait": operationWaitFailure("boom"),
+		"/1.0/operations/failed-op/wait": operationWaitFailure(`Failed getting root disk: No root device could be found at /var/lib/incus/unix.socket`),
 	}}
 	s := NewService(fb)
 	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
@@ -411,7 +428,7 @@ func TestAsyncCreateFailsWhenOperationFails(t *testing.T) {
 		t.Fatalf("err = %v, want INCUS_OPERATION_FAILED", r.Err)
 	}
 	raw := r.Err.Error()
-	if strings.Contains(raw, "boom") {
+	if strings.Contains(raw, "root disk") || strings.Contains(raw, "/var/lib/incus") {
 		t.Fatalf("operation failure leaked raw Incus error: %q", raw)
 	}
 }

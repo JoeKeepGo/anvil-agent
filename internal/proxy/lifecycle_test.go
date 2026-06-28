@@ -123,6 +123,21 @@ func TestLifecycleCreateHappyPath(t *testing.T) {
 	if !strings.Contains(string(fake.calls[0].Body), `"virtual-machine"`) {
 		t.Fatalf("body not allowlisted: %s", fake.calls[0].Body)
 	}
+	var createBody map[string]interface{}
+	if err := json.Unmarshal(fake.calls[0].Body, &createBody); err != nil {
+		t.Fatalf("unmarshal create body: %v", err)
+	}
+	devices, ok := createBody["devices"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("devices = %#v, want object", createBody["devices"])
+	}
+	root, ok := devices["root"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("root device = %#v, want object", devices["root"])
+	}
+	if root["type"] != "disk" || root["path"] != "/" || root["size"] != "1024" {
+		t.Fatalf("root device = %#v, want disk path / size 1024", root)
+	}
 }
 
 func TestLifecycleCreateInvalidPayloadRejected(t *testing.T) {

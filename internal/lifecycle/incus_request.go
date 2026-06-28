@@ -37,6 +37,7 @@ type incusImageSource struct {
 
 type incusRootDevice struct {
 	Type string `json:"type"`
+	Path string `json:"path"`
 	Size string `json:"size"`
 }
 
@@ -82,7 +83,7 @@ func buildCreate(encodedName string, payload interface{}) (*incus.ProxyRequest, 
 			"limits.memory": formatSize(req.MemoryBytes),
 		},
 		Devices: map[string]incusRootDevice{
-			"root": {Type: "disk", Size: formatSize(req.RootDiskBytes)},
+			"root": {Type: "disk", Path: "/", Size: formatSize(req.RootDiskBytes)},
 		},
 	}
 	raw, err := json.Marshal(body)
