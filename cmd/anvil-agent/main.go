@@ -38,7 +38,7 @@ func main() {
 	})
 	networkApplier := network.NewApplier(cfg.ManagedInterfacePrefix)
 	lifecycleSvc := lifecycle.NewService(incusClient)
-	vmDetector := alwaysAvailable{}
+	vmDetector := lifecycle.NewReadinessDetector(incusClient)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -58,9 +58,3 @@ func main() {
 		log.Fatalf("server error: %v", err)
 	}
 }
-
-// alwaysAvailable is a VMLifecycleDetector that reports readiness whenever
-// the lifecycle service is wired into the agent.
-type alwaysAvailable struct{}
-
-func (alwaysAvailable) VMLifecycleAvailable(context.Context) (bool, error) { return true, nil }

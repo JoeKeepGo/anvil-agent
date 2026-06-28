@@ -261,8 +261,12 @@ func (s *Service) defaultProfileRootDisk(ctx context.Context) (profileRootDiskDe
 	if resp.Status < 200 || resp.Status >= 300 {
 		return profileRootDiskDevice{}, newErr(http.StatusBadGateway, "INCUS_PROFILE_UNAVAILABLE", "incus default profile unavailable")
 	}
+	return rootDiskFromDefaultProfileResponse(resp)
+}
+
+func rootDiskFromDefaultProfileResponse(resp *incus.ProxyResponse) (profileRootDiskDevice, *Error) {
 	var env incusProfileEnvelope
-	if len(resp.Body) == 0 || json.Unmarshal(resp.Body, &env) != nil || env.Metadata.Devices == nil {
+	if resp == nil || len(resp.Body) == 0 || json.Unmarshal(resp.Body, &env) != nil || env.Metadata.Devices == nil {
 		return profileRootDiskDevice{}, newErr(http.StatusBadGateway, "INCUS_PROFILE_UNAVAILABLE", "incus default profile response is malformed")
 	}
 	return selectProfileRootDisk(env.Metadata.Devices)

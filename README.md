@@ -112,7 +112,7 @@ Interface names must match the Anvil-managed prefix (`anvilwg` by default); requ
 
 ## VM Lifecycle Protocol
 
-The agent exposes a narrow, trusted backend-to-agent VM lifecycle protocol. It dispatches only the allowlisted Incus instance operations `create`, `start`, `stop`, `restart`, and `delete`, and never exposes arbitrary Incus write paths, shell execution, snapshots, migration, console, or file operations. The agent owns lifecycle response normalization and never echoes raw Incus output, the Incus Unix socket path, tokens, host private config, or product state.
+The agent exposes a narrow, trusted backend-to-agent VM lifecycle protocol. It dispatches only the allowlisted Incus instance operations `create`, `start`, `stop`, `restart`, and `delete`, and never exposes arbitrary Incus write paths, shell execution, snapshots, migration, console, or file operations. The agent owns lifecycle response normalization and never echoes raw Incus output, the Incus Unix socket path, tokens, host private config, or product state. The `vmLifecycle` state capability is reported only when the lifecycle protocol is wired and the host can actually support Incus virtual-machine creation, including `/dev/kvm` availability and a safe default profile root disk.
 
 Endpoint shape (trusted WS messages, not browser-public):
 
