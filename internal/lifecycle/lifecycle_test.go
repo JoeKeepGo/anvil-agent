@@ -72,6 +72,26 @@ func operationWaitFailure(message string) *incus.ProxyResponse {
 	return operationWait(400, "Failure", message)
 }
 
+func profileWithRoot(devices map[string]map[string]string) *incus.ProxyResponse {
+	raw, err := json.Marshal(map[string]interface{}{
+		"type": "sync",
+		"metadata": map[string]interface{}{
+			"name":    "default",
+			"devices": devices,
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return &incus.ProxyResponse{Status: http.StatusOK, Body: raw}
+}
+
+func defaultProfileRoot() *incus.ProxyResponse {
+	return profileWithRoot(map[string]map[string]string{
+		"root": {"type": "disk", "path": "/", "pool": "default"},
+	})
+}
+
 func mustJSON(t *testing.T, v interface{}) json.RawMessage {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -210,25 +230,30 @@ func TestCreateRejectsUnknownFields(t *testing.T) {
 }
 
 func TestCreateConstructsAllowlistedIncusRequest(t *testing.T) {
-	fb := &fakeIncus{}
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": defaultProfileRoot(),
+	}}
 	s := NewService(fb)
 	body := mustJSON(t, CreateInstanceRequest{Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 2, MemoryBytes: 1 << 30, RootDiskBytes: 1 << 32})
 	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", body)
 	if r.Err != nil {
 		t.Fatalf("create failed: %v", r.Err)
 	}
-	if len(fb.calls) != 2 {
-		t.Fatalf("incus calls = %d, want 2", len(fb.calls))
+	if len(fb.calls) != 3 {
+		t.Fatalf("incus calls = %d, want profile + create + verify", len(fb.calls))
 	}
-	call := fb.calls[0]
+	if fb.calls[0].Method != http.MethodGet || fb.calls[0].Path != "/1.0/profiles/default" {
+		t.Fatalf("profile call = %s %s, want GET /1.0/profiles/default", fb.calls[0].Method, fb.calls[0].Path)
+	}
+	call := fb.calls[1]
 	if call.Method != http.MethodPost {
 		t.Fatalf("method = %s, want POST", call.Method)
 	}
 	if call.Path != "/1.0/instances" {
 		t.Fatalf("path = %q, want /1.0/instances", call.Path)
 	}
-	if fb.calls[1].Method != http.MethodGet || fb.calls[1].Path != "/1.0/instances/vm-1" {
-		t.Fatalf("verify call = %s %s, want GET /1.0/instances/vm-1", fb.calls[1].Method, fb.calls[1].Path)
+	if fb.calls[2].Method != http.MethodGet || fb.calls[2].Path != "/1.0/instances/vm-1" {
+		t.Fatalf("verify call = %s %s, want GET /1.0/instances/vm-1", fb.calls[2].Method, fb.calls[2].Path)
 	}
 	var sent map[string]interface{}
 	if err := json.Unmarshal(call.Body, &sent); err != nil {
@@ -251,12 +276,145 @@ func TestCreateConstructsAllowlistedIncusRequest(t *testing.T) {
 	if root["path"] != "/" {
 		t.Fatalf("root.path = %v, want / so Incus recognizes a root disk", root["path"])
 	}
+	if root["pool"] != "default" {
+		t.Fatalf("root.pool = %v, want default inherited from profile", root["pool"])
+	}
 	if root["size"] != "4294967296" {
 		t.Fatalf("root.size = %v, want 4294967296", root["size"])
 	}
 	raw := string(call.Body)
 	if strings.Contains(raw, "shellCommand") || strings.Contains(raw, "hookCommand") {
 		t.Fatalf("sent body leaked forbidden field: %s", raw)
+	}
+}
+
+func TestCreateUsesDefaultProfileRootDiskDeviceName(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": profileWithRoot(map[string]map[string]string{
+			"rootfs": {"type": "disk", "path": "/", "pool": "fast"},
+		}),
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 2048,
+	}))
+	if r.Err != nil {
+		t.Fatalf("create failed: %v", r.Err)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal(fb.calls[1].Body, &sent); err != nil {
+		t.Fatalf("unmarshal sent body: %v", err)
+	}
+	devices := sent["devices"].(map[string]interface{})
+	if _, ok := devices["root"]; ok {
+		t.Fatalf("hardcoded root device was sent: %#v", devices)
+	}
+	rootfs, ok := devices["rootfs"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("rootfs device = %#v, want object", devices["rootfs"])
+	}
+	if rootfs["type"] != "disk" || rootfs["path"] != "/" || rootfs["pool"] != "fast" || rootfs["size"] != "2048" {
+		t.Fatalf("rootfs device = %#v, want profile root disk with size override", rootfs)
+	}
+}
+
+func TestCreateFailsSafelyWhenDefaultProfileRootDiskIsMissing(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": profileWithRoot(map[string]map[string]string{
+			"eth0": {"type": "nic", "network": "incusbr0"},
+		}),
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_PROFILE_ROOT_DISK_UNAVAILABLE" {
+		t.Fatalf("err = %v, want INCUS_PROFILE_ROOT_DISK_UNAVAILABLE", r.Err)
+	}
+	for _, call := range fb.calls {
+		if call.Path == "/1.0/instances" {
+			t.Fatalf("create reached Incus despite unsafe profile: %+v", call)
+		}
+	}
+}
+
+func TestCreateFailsSafelyWhenDefaultProfileRootDiskHasNoPool(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": profileWithRoot(map[string]map[string]string{
+			"root": {"type": "disk", "path": "/"},
+		}),
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_PROFILE_ROOT_DISK_UNAVAILABLE" {
+		t.Fatalf("err = %v, want INCUS_PROFILE_ROOT_DISK_UNAVAILABLE", r.Err)
+	}
+	for _, call := range fb.calls {
+		if call.Path == "/1.0/instances" {
+			t.Fatalf("create reached Incus despite unsafe profile: %+v", call)
+		}
+	}
+}
+
+func TestCreateFailsSafelyWhenDefaultProfileHasMultipleRootDisks(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": profileWithRoot(map[string]map[string]string{
+			"root":  {"type": "disk", "path": "/", "pool": "default"},
+			"root2": {"type": "disk", "path": "/", "pool": "other"},
+		}),
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_PROFILE_ROOT_DISK_AMBIGUOUS" {
+		t.Fatalf("err = %v, want INCUS_PROFILE_ROOT_DISK_AMBIGUOUS", r.Err)
+	}
+	for _, call := range fb.calls {
+		if call.Path == "/1.0/instances" {
+			t.Fatalf("create reached Incus despite ambiguous profile: %+v", call)
+		}
+	}
+}
+
+func TestCreateFailsSafelyWhenDefaultProfileReadFails(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": {Status: http.StatusInternalServerError, Body: json.RawMessage(`{"metadata":{"err":"MUST-NOT-LEAK"}}`)},
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_PROFILE_UNAVAILABLE" {
+		t.Fatalf("err = %v, want INCUS_PROFILE_UNAVAILABLE", r.Err)
+	}
+	if strings.Contains(r.Err.Error(), "MUST-NOT-LEAK") {
+		t.Fatalf("profile failure leaked raw Incus body: %q", r.Err.Error())
+	}
+	for _, call := range fb.calls {
+		if call.Path == "/1.0/instances" {
+			t.Fatalf("create reached Incus despite profile read failure: %+v", call)
+		}
+	}
+}
+
+func TestCreateFailsSafelyWhenDefaultProfileResponseMalformed(t *testing.T) {
+	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default": {Status: http.StatusOK, Body: json.RawMessage(`{not json`)},
+	}}
+	s := NewService(fb)
+	r := s.Handle(context.Background(), http.MethodPost, "/agent/v1/lifecycle/instances/create", mustJSON(t, CreateInstanceRequest{
+		Name: "vm-1", Image: "ubuntu/24.04", CPUCount: 1, MemoryBytes: 1024, RootDiskBytes: 1024,
+	}))
+	if r.Err == nil || r.Err.Code != "INCUS_PROFILE_UNAVAILABLE" {
+		t.Fatalf("err = %v, want INCUS_PROFILE_UNAVAILABLE", r.Err)
+	}
+	for _, call := range fb.calls {
+		if call.Path == "/1.0/instances" {
+			t.Fatalf("create reached Incus despite malformed profile response: %+v", call)
+		}
 	}
 }
 
@@ -371,6 +529,7 @@ func TestNormalizeSyncResponse(t *testing.T) {
 
 func TestAsyncCreateWaitsForOperationCompletionBeforeReturningSuccess(t *testing.T) {
 	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default":        defaultProfileRoot(),
 		"/1.0/instances":               asyncOK("abc-123"),
 		"/1.0/operations/abc-123/wait": operationWaitSuccess(),
 		"/1.0/instances/vm-1":          syncOK(),
@@ -393,13 +552,14 @@ func TestAsyncCreateWaitsForOperationCompletionBeforeReturningSuccess(t *testing
 	if resp.Status != "operation-completed" {
 		t.Fatalf("status = %q, want operation-completed", resp.Status)
 	}
-	if len(fb.calls) != 3 {
-		t.Fatalf("calls = %d, want create + wait + instance verify", len(fb.calls))
+	if len(fb.calls) != 4 {
+		t.Fatalf("calls = %d, want profile + create + wait + instance verify", len(fb.calls))
 	}
 }
 
 func TestAsyncCreateFailsWhenOperationDisappears(t *testing.T) {
 	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default":           defaultProfileRoot(),
 		"/1.0/instances":                  asyncOK("missing-op"),
 		"/1.0/operations/missing-op/wait": {Status: http.StatusNotFound},
 	}}
@@ -417,6 +577,7 @@ func TestAsyncCreateFailsWhenOperationDisappears(t *testing.T) {
 
 func TestAsyncCreateFailsWhenOperationFails(t *testing.T) {
 	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default":          defaultProfileRoot(),
 		"/1.0/instances":                 asyncOK("failed-op"),
 		"/1.0/operations/failed-op/wait": operationWaitFailure(`Failed getting root disk: No root device could be found at /var/lib/incus/unix.socket`),
 	}}
@@ -435,6 +596,7 @@ func TestAsyncCreateFailsWhenOperationFails(t *testing.T) {
 
 func TestAsyncCreateFailsWhenCompletedInstanceIsMissing(t *testing.T) {
 	fb := &fakeIncus{resps: map[string]*incus.ProxyResponse{
+		"/1.0/profiles/default":             defaultProfileRoot(),
 		"/1.0/instances":                    asyncOK("completed-op"),
 		"/1.0/operations/completed-op/wait": operationWaitSuccess(),
 		"/1.0/instances/vm-1":               {Status: http.StatusNotFound},

@@ -20,14 +20,15 @@ type incusInstanceState struct {
 // incusInstanceCreate is the documented Incus instance-creation body for POST
 // /1.0/instances. The agent fixes the instance type to "virtual-machine"
 // (M13 is the VM lifecycle foundation) and only emits allowlisted, validated
-// fields. No config keys, devices, profiles, cloud-init, or user data beyond
-// the bounded limits are accepted from the request.
+// fields. No config keys, devices, profiles, cloud-init, or user data are
+// accepted from the request; the root disk device is copied from the default
+// profile by the service and only its size is overridden.
 type incusInstanceCreate struct {
-	Name    string                     `json:"name"`
-	Type    string                     `json:"type"`
-	Source  incusImageSource           `json:"source"`
-	Config  map[string]string          `json:"config"`
-	Devices map[string]incusRootDevice `json:"devices"`
+	Name    string                       `json:"name"`
+	Type    string                       `json:"type"`
+	Source  incusImageSource             `json:"source"`
+	Config  map[string]string            `json:"config"`
+	Devices map[string]map[string]string `json:"devices"`
 }
 
 type incusImageSource struct {
@@ -35,10 +36,9 @@ type incusImageSource struct {
 	Alias string `json:"alias"`
 }
 
-type incusRootDevice struct {
-	Type string `json:"type"`
-	Path string `json:"path"`
-	Size string `json:"size"`
+type createPayload struct {
+	Request  CreateInstanceRequest
+	RootDisk profileRootDiskDevice
 }
 
 // BuildIncusRequest constructs the allowlisted Incus ProxyRequest for a
@@ -65,10 +65,11 @@ func BuildIncusRequest(action Action, name string, payload interface{}) (*incus.
 }
 
 func buildCreate(encodedName string, payload interface{}) (*incus.ProxyRequest, *Error) {
-	req, ok := payload.(CreateInstanceRequest)
+	create, ok := payload.(createPayload)
 	if !ok {
 		return nil, newErr(http.StatusInternalServerError, "INTERNAL", "invalid create payload")
 	}
+	req := create.Request
 	if err := ValidateCreate(req); err != nil {
 		return nil, err
 	}
@@ -82,8 +83,8 @@ func buildCreate(encodedName string, payload interface{}) (*incus.ProxyRequest, 
 			"limits.cpu":    fmt.Sprintf("%d", req.CPUCount),
 			"limits.memory": formatSize(req.MemoryBytes),
 		},
-		Devices: map[string]incusRootDevice{
-			"root": {Type: "disk", Path: "/", Size: formatSize(req.RootDiskBytes)},
+		Devices: map[string]map[string]string{
+			create.RootDisk.Name: create.RootDisk.deviceWithSize(formatSize(req.RootDiskBytes)),
 		},
 	}
 	raw, err := json.Marshal(body)

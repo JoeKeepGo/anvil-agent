@@ -181,7 +181,14 @@ func (s *Service) handleCreate(ctx context.Context, method string, body json.Raw
 	if err != nil {
 		return Result{Err: err}
 	}
-	incusReq, err := BuildIncusRequest(ActionCreate, req.Name, req)
+	rootDisk, err := s.defaultProfileRootDisk(ctx)
+	if err != nil {
+		return Result{Err: err}
+	}
+	incusReq, err := BuildIncusRequest(ActionCreate, req.Name, createPayload{
+		Request:  req,
+		RootDisk: rootDisk,
+	})
 	if err != nil {
 		return Result{Err: err}
 	}
@@ -238,6 +245,27 @@ func (s *Service) execute(ctx context.Context, action Action, name string, req *
 		return Result{Err: newErr(http.StatusServiceUnavailable, "INCUS_UNAVAILABLE", "incus lifecycle backend unavailable")}
 	}
 	return s.normalizeResponse(ctx, action, name, resp)
+}
+
+func (s *Service) defaultProfileRootDisk(ctx context.Context) (profileRootDiskDevice, *Error) {
+	if err := ctx.Err(); err != nil {
+		return profileRootDiskDevice{}, newErr(http.StatusServiceUnavailable, "REQUEST_CANCELLED", "request cancelled")
+	}
+	resp := s.incus.Execute(ctx, &incus.ProxyRequest{
+		Method: http.MethodGet,
+		Path:   "/1.0/profiles/default",
+	})
+	if resp == nil {
+		return profileRootDiskDevice{}, newErr(http.StatusServiceUnavailable, "INCUS_PROFILE_UNAVAILABLE", "incus default profile unavailable")
+	}
+	if resp.Status < 200 || resp.Status >= 300 {
+		return profileRootDiskDevice{}, newErr(http.StatusBadGateway, "INCUS_PROFILE_UNAVAILABLE", "incus default profile unavailable")
+	}
+	var env incusProfileEnvelope
+	if len(resp.Body) == 0 || json.Unmarshal(resp.Body, &env) != nil || env.Metadata.Devices == nil {
+		return profileRootDiskDevice{}, newErr(http.StatusBadGateway, "INCUS_PROFILE_UNAVAILABLE", "incus default profile response is malformed")
+	}
+	return selectProfileRootDisk(env.Metadata.Devices)
 }
 
 // normalizeResponse converts an Incus ProxyResponse into the agent-owned
@@ -367,6 +395,51 @@ type incusEnvelope struct {
 		Status     string `json:"status"`
 		Err        string `json:"err"`
 	} `json:"metadata"`
+}
+
+type incusProfileEnvelope struct {
+	Metadata struct {
+		Devices map[string]map[string]string `json:"devices"`
+	} `json:"metadata"`
+}
+
+type profileRootDiskDevice struct {
+	Name   string
+	Device map[string]string
+}
+
+func selectProfileRootDisk(devices map[string]map[string]string) (profileRootDiskDevice, *Error) {
+	matches := make([]profileRootDiskDevice, 0, 1)
+	for name, device := range devices {
+		if device["type"] != "disk" || device["path"] != "/" || device["source"] != "" {
+			continue
+		}
+		copied := make(map[string]string, len(device)+1)
+		for k, v := range device {
+			copied[k] = v
+		}
+		matches = append(matches, profileRootDiskDevice{Name: name, Device: copied})
+	}
+	if len(matches) == 0 {
+		return profileRootDiskDevice{}, newErr(http.StatusBadGateway, "INCUS_PROFILE_ROOT_DISK_UNAVAILABLE", "incus default profile root disk unavailable")
+	}
+	if len(matches) > 1 {
+		return profileRootDiskDevice{}, newErr(http.StatusBadGateway, "INCUS_PROFILE_ROOT_DISK_AMBIGUOUS", "incus default profile root disk is ambiguous")
+	}
+	root := matches[0]
+	if root.Device["pool"] == "" {
+		return profileRootDiskDevice{}, newErr(http.StatusBadGateway, "INCUS_PROFILE_ROOT_DISK_UNAVAILABLE", "incus default profile root disk unavailable")
+	}
+	return root, nil
+}
+
+func (d profileRootDiskDevice) deviceWithSize(size string) map[string]string {
+	device := make(map[string]string, len(d.Device)+1)
+	for k, v := range d.Device {
+		device[k] = v
+	}
+	device["size"] = size
+	return device
 }
 
 // normalizeOperationID extracts the trailing path segment of an Incus
