@@ -1,0 +1,157 @@
+name: M13 PR11 Remote KVM Incus Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/m13-kvm-incus-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  kvm-incus-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out PR 11 head
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Print runner KVM facts
+        run: |
+          set -euxo pipefail
+          uname -a
+          lscpu
+          id
+          groups
+          test -e /dev/kvm
+          ls -l /dev/kvm
+          sudo test -r /dev/kvm
+          sudo test -w /dev/kvm
+
+      - name: Install and initialize Incus
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y incus qemu-system-x86 jq curl
+          sudo systemctl enable --now incus
+          sudo incus admin init --auto --storage-backend=dir
+          sudo incus version
+          sudo incus info
+          sudo incus storage list
+          sudo incus profile show default
+
+      - name: Run agent unit gates on runner
+        run: |
+          set -euxo pipefail
+          go test ./internal/lifecycle ./internal/state ./internal/proxy -count=1
+          go test ./... -count=1
+          go vet ./...
+          test -z "$(gofmt -l .)"
+          git diff --check
+
+      - name: Cache small Incus VM image
+        run: |
+          set -euxo pipefail
+          sudo incus image copy images:alpine/3.22 local: --vm --alias anvil-m13-ci-image
+          sudo incus image info anvil-m13-ci-image
+
+      - name: Build and start PR11 agent against local Incus
+        run: |
+          set -euxo pipefail
+          go build -o /tmp/anvil-agent-pr11 ./cmd/anvil-agent
+          sudo install -d -m 0755 /var/lib/anvil-agent-ci
+          sudo env ANVIL_AGENT_PORT=19091 ANVIL_AGENT_STATE_DIR=/var/lib/anvil-agent-ci /tmp/anvil-agent-pr11 > /tmp/anvil-agent-pr11.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:19091/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          sudo cat /tmp/anvil-agent-pr11.log
+          exit 1
+
+      - name: Smoke lifecycle through agent WebSocket
+        run: |
+          set -euxo pipefail
+          cat > m13_agent_ws_smoke_tmp.go <<'GO'
+          package main
+
+          import (
+            "context"
+            "encoding/json"
+            "fmt"
+            "os"
+            "time"
+
+            "github.com/coder/websocket"
+          )
+
+          type proxyResponse struct {
+            ID     string          `json:"id"`
+            Status int             `json:"status"`
+            Body   json.RawMessage `json:"body"`
+            Error  string          `json:"error,omitempty"`
+          }
+
+          func main() {
+            ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+            defer cancel()
+
+            conn, _, err := websocket.Dial(ctx, "ws://127.0.0.1:19091/ws", nil)
+            if err != nil {
+              fatalf("dial agent websocket: %v", err)
+            }
+            defer conn.Close(websocket.StatusNormalClosure, "done")
+
+            request(ctx, conn, `{"id":"state","method":"GET","path":"/agent/v1/state"}`, 200)
+            request(ctx, conn, `{"id":"caps","method":"GET","path":"/agent/v1/lifecycle/capabilities"}`, 200)
+            request(ctx, conn, `{"id":"create","method":"POST","path":"/agent/v1/lifecycle/instances/create","body":{"name":"anvil-m13-ci-smoke","image":"anvil-m13-ci-image","cpuCount":1,"memoryBytes":268435456,"rootDiskBytes":2147483648}}`, 200)
+            request(ctx, conn, `{"id":"delete","method":"POST","path":"/agent/v1/lifecycle/instances/anvil-m13-ci-smoke/delete","body":{"confirm":true}}`, 200)
+          }
+
+          func request(ctx context.Context, conn *websocket.Conn, payload string, wantStatus int) {
+            if err := conn.Write(ctx, websocket.MessageText, []byte(payload)); err != nil {
+              fatalf("write request: %v", err)
+            }
+            _, raw, err := conn.Read(ctx)
+            if err != nil {
+              fatalf("read response: %v", err)
+            }
+            var resp proxyResponse
+            if err := json.Unmarshal(raw, &resp); err != nil {
+              fatalf("decode response %s: %v", string(raw), err)
+            }
+            fmt.Printf("%s\n", string(raw))
+            if resp.Status != wantStatus {
+              fatalf("response %s status = %d, want %d, error=%q", resp.ID, resp.Status, wantStatus, resp.Error)
+            }
+          }
+
+          func fatalf(format string, args ...interface{}) {
+            fmt.Fprintf(os.Stderr, format+"\n", args...)
+            os.Exit(1)
+          }
+          GO
+          go run m13_agent_ws_smoke_tmp.go
+          rm -f m13_agent_ws_smoke_tmp.go
+
+      - name: Verify no smoke leftovers
+        if: always()
+        run: |
+          set -euxo pipefail
+          curl -fsS http://127.0.0.1:19091/health || true
+          sudo incus list --format=json || true
+          sudo incus operation list --format=json || true
+          sudo incus delete anvil-m13-ci-smoke --force || true
+          sudo incus list --format=json || true
+          sudo cat /tmp/anvil-agent-pr11.log || true
